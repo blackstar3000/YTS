@@ -1,0 +1,19 @@
+{
+  "name": "yts-eztv-stremio-addon",
+  "version": "2.0.0",
+  "description": "Stremio addon for YTS movies and EZTV TV series",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "axios": "^1.15.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

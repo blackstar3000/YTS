@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: yts-eztv-stremio-addon
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: PORT
+        value: 10000
+    healthCheckPath: /manifest.json
