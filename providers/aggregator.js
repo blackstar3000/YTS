@@ -62,29 +62,44 @@ async function getMovies(params) {
 }
 
 async function getMovieByImdb(imdbId) {
+  const allTorrents = [];
+  let providerUsed = 'yts'; // Default
+
   try {
-    const movie = await withTimeout(yts.getMovieByImdb(imdbId), 8000);
-
-    if (movie) {
+    const movieYts = await withTimeout(yts.getMovieByImdb(imdbId), 8000);
+    if (movieYts && movieYts.torrents) {
+      allTorrents.push(...movieYts.torrents);
       health.markSuccess('yts');
-      return movie;
     }
-
-  } catch {
+  } catch (err) {
+    console.warn(`[aggregator] YTS movie failed: ${err.message}`);
     health.markFailure('yts');
   }
 
   try {
-    const movie = await withTimeout(jackett.getMovieByImdb(imdbId), 8000);
-    if (movie) {
+    const movieJackett = await withTimeout(jackett.getMovieByImdb(imdbId), 8000);
+    if (movieJackett && movieJackett.torrents) {
+      allTorrents.push(...movieJackett.torrents);
       health.markSuccess('jackett');
-      return movie;
+      // If we got Jackett results, we mark the provider as jackett
+      // (since we merge, the a mix of both is present)
+      providerUsed = 'jackett';
     }
-  } catch {
+  } catch (err) {
+    console.warn(`[aggregator] Jackett movie failed: ${err.message}`);
     health.markFailure('jackett');
   }
 
-  return fallback.getMovieByImdb(imdbId);
+  if (allTorrents.length === 0) {
+    return fallback.getMovieByImdb(imdbId);
+  }
+
+  return {
+    imdbId,
+    title: 'Aggregated Result',
+    provider: providerUsed,
+    torrents: allTorrents
+  };
 }
 
 async function getShowMeta(imdbId) {

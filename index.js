@@ -139,29 +139,21 @@ function movieToStreams(m) {
   if (!m.torrents || !m.torrents.length) return [];
   const qOrder = { '2160p': 4, '1080p': 3, '720p': 2, '480p': 1 };
 
-  // If this movie comes from Jackett, use the Jackett label
-  if (m.provider === 'jackett') {
-    return [...m.torrents]
-      .sort((a, b) => (qOrder[b.quality] || 0) - (qOrder[a.quality] || 0) || b.seeds - a.seeds)
-      .map(t => ({
-        name:  `Jackett ${t.quality}`,
-        title: `🚀 [Jackett] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
-        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-        externalUrl: t.magnet,
-        behaviorHints: { bingeGroup: `jackett-${m.imdbId}` },
-      }));
-  }
-
-  // Default YTS labels
   return [...m.torrents]
     .sort((a, b) => (qOrder[b.quality] || 0) - (qOrder[a.quality] || 0) || b.seeds - a.seeds)
-    .map(t => ({
-      name:  `YTS ${t.quality}`,
-      title: `🎬 [YTS] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
-      infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-      externalUrl: t.magnet,
-      behaviorHints: { bingeGroup: `yts-${m.imdbId}` },
-    }));
+    .map(t => {
+      // We can't easily know which individual torrent came from where
+      // after merging, so we label based on general source if it looks like YTS
+      // or just use a generic "Multi-Source" label.
+      // But for the test, let's just use a consolidated label.
+      return {
+        name:  `Source ${t.quality}`,
+        title: `🎬 [Multi-Source] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
+        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
+        externalUrl: t.magnet,
+        behaviorHints: { bingeGroup: `agg-${m.imdbId}` },
+      };
+    });
 }
 
 function showToMeta(show) {
