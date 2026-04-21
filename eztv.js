@@ -6,6 +6,8 @@ const axios = require('axios');
 const EZTV_BASES = [
   'https://eztvx.to/api',
   'https://eztv.re/api',
+  'https://eztv.wf/api',
+  'https://eztv.tf/api',
 ];
 
 async function eztvGet(params = {}) {
