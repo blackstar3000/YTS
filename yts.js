@@ -14,6 +14,7 @@ const YTS_BASES = [
   'https://en.yts-official.org/api/v2',
   'https://yts1.mx/api/v2',
   'https://yts.proxyninja.org/api/v2',
+  'https://yts.rs/api/v2'
 ];
 
 const TRACKERS = [
