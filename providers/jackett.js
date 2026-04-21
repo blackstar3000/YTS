@@ -45,12 +45,12 @@ async function getTorrents(imdbId, quality = null) {
         for (const t of torrents) {
           // Better quality extraction: check both title and description
           const searchString = `${t.title} ${t.description || ''}`;
-          const qualityMatch = searchString.match(/\\b(2160p|1080p|720p|480p)\\b/i);
+          const qualityMatch = searchString.match(/\b(2160p|1080p|720p|480p)\b/i);
           const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : 'Unknown';
 
           if (quality && extractedQuality !== quality) continue;
 
-          const typeMatch = searchString.match(/\\b(BluRay|WEB-DL|HDRip|BRRip)\\b/i);
+          const typeMatch = searchString.match(/\b(BluRay|WEB-DL|HDRip|BRRip)\b/i);
 
           results.push({
             quality: extractedQuality,
