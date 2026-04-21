@@ -2,8 +2,7 @@
 'use strict';
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-const { listMovies, getMovieByImdb } = require('./yts');
-const { getLatestShows, getShowTorrents } = require('./eztv');
+const { getMovies, getMovieByImdb, getLatestShows, getShowTorrents } = require('./providers/aggregator');
 
 // ---------------------------------------------------------------------------
 // Genres
@@ -199,7 +198,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     const cacheKey = `yts:${id}:${page}:${effectiveGenre || ''}:${search || ''}`;
     try {
       const movies = await cached(cacheKey, 5 * 60 * 1000, () =>
-        listMovies({ query: search, genre: effectiveGenre, page, limit: 20, sortBy, minRating, quality })
+        getMovies({ query: search, genre: effectiveGenre, page, limit: 20, sortBy, minRating, quality })
       );
       return { metas: movies.map(movieToMeta) };
     } catch (err) {
@@ -276,10 +275,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
   if (type === 'movie') {
     try {
       const movie = await cached(`streams:movie:${imdbId}`, 10 * 60 * 1000, () => getMovieByImdb(imdbId));
-      return { streams: movie ? movieToStreams(movie) : [] };
+      return { streams: movie ? movieToStreams(movie) : [], cacheMaxAge: 3600 };
     } catch (err) {
       console.error('[stream/movie]', err.message);
-      return { streams: [] };
+      return { streams: [], cacheMaxAge: 3600 };
     }
   }
 
@@ -294,14 +293,14 @@ builder.defineStreamHandler(async ({ type, id }) => {
         externalUrl: t.magnet,
         behaviorHints: { bingeGroup: `eztv-${imdbId}` },
       }));
-      return { streams };
+      return { streams, cacheMaxAge: 3600 };
     } catch (err) {
       console.error('[stream/series]', err.message);
-      return { streams: [] };
+      return { streams: [], cacheMaxAge: 3600 };
     }
   }
 
-  return { streams: [] };
+  return { streams: [], cacheMaxAge: 3600 };
 });
 
 // ---------------------------------------------------------------------------
