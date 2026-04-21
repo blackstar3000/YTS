@@ -16,7 +16,7 @@ async function getTorrents(imdbId, quality = null) {
     return [];
   }
 
-  const indexers = ['1337x', 'torrentia', 'thepiratebay', 'therarbg'];
+  const indexers = ['rutor', 'rutracker', 'thepiratebay', 'therarbg'];
   const results = [];
 
   try {
