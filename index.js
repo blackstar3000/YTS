@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { addonBuilder, serveHTTP, publishToCentral } = require('stremio-addon-sdk');
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const { listMovies, getMovieByImdb } = require('./yts');
 const { getLatestShows, getShowTorrents } = require('./eztv');
 
@@ -23,8 +23,7 @@ const manifest = {
   version: '2.0.0',
   name: 'YTS + EZTV',
   description: 'Movies from YTS (720p/1080p/4K) + TV Series from EZTV — all via magnet links',
-  logo:       'https://upload.wikimedia.org/wikipedia/commons/1/18/YTS_logo.png',
-  background: 'https://ytstv.bz/assets/images/background.jpg',
+  logo: 'https://yts.mx/assets/images/website/logo-YTS.svg',
 
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
@@ -308,23 +307,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-const PORT       = process.env.PORT || 7000;
-const PUBLIC_URL = process.env.PUBLIC_URL || '';   // e.g. https://your-app.onrender.com
-
-serveHTTP(builder.getInterface(), {
-  port:        PORT,
-  cacheMaxAge: 60 * 60, // 1 hour — browsers/Stremio cache responses, reduces API hits
-});
-
-// Publish to Stremio Community Addons once you have a live public URL.
-// Set the PUBLIC_URL environment variable on Render/Railway and it activates automatically.
-if (PUBLIC_URL) {
-  const manifestUrl = `${PUBLIC_URL}/manifest.json`;
-  publishToCentral(manifestUrl);
-  console.log(`\n📡  Published to Stremio Central: ${manifestUrl}`);
-} else {
-  console.log('\n💡  Set PUBLIC_URL env var when deployed to publish to Stremio Community Addons.');
-}
+const PORT = process.env.PORT || 7000;
+serveHTTP(builder.getInterface(), { port: PORT });
 
 console.log('\n🎬  YTS + EZTV Stremio Addon is running!');
 console.log(`    Manifest : http://localhost:${PORT}/manifest.json`);
