@@ -3,6 +3,7 @@
 const yts = require('./yts');
 const fallback = require('./fallback');
 const jackett = require('./jackett');
+const eztv = require('./eztv');
 const { raceProviders } = require('./race');
 const health = require('./health');
 
@@ -85,7 +86,37 @@ async function getMovieByImdb(imdbId) {
   return fallback.getMovieByImdb(imdbId);
 }
 
+async function getShowTorrents(imdbId) {
+  try {
+    const torrents = await eztv.getShowTorrents(imdbId);
+    if (torrents && Object.keys(torrents).length > 0) {
+      health.markSuccess('eztv');
+      return torrents;
+    }
+  } catch (err) {
+    console.warn(`[aggregator] EZTV show torrents failed: ${err.message}`);
+    health.markFailure('eztv');
+  }
+  return fallback.getShowTorrents(imdbId);
+}
+
+async function getLatestShows(page) {
+  try {
+    const shows = await eztv.getLatestShows(page);
+    if (shows && shows.length > 0) {
+      health.markSuccess('eztv');
+      return shows;
+    }
+  } catch (err) {
+    console.warn(`[aggregator] EZTV latest shows failed: ${err.message}`);
+    health.markFailure('eztv');
+  }
+  return fallback.getLatestShows(page);
+}
+
 module.exports = {
   getMovies,
-  getMovieByImdb
+  getMovieByImdb,
+  getLatestShows,
+  getShowTorrents
 };
