@@ -4,6 +4,7 @@ const yts = require('./yts');
 const fallback = require('./fallback');
 const jackett = require('./jackett');
 const eztv = require('./eztv');
+const omdb = require('./omdb');
 const { raceProviders } = require('./race');
 const health = require('./health');
 
@@ -19,7 +20,7 @@ function withTimeout(promise, ms = 8000) {
 async function getMovies(params) {
   let providers = [
     { name: 'yts', fn: () => withTimeout(yts.listMovies(params), 8000) },
-    { name: 'fallback', fn: () => withTimeout(fallback.getMovies(params), 8000) }
+    { name: 'fallback', fn: () => withTimeout(fallback.listMovies(params), 8000) }
   ].filter(p => health.isHealthy(p.name));
 
   // 🔥 critical safety
@@ -86,6 +87,20 @@ async function getMovieByImdb(imdbId) {
   return fallback.getMovieByImdb(imdbId);
 }
 
+async function getShowMeta(imdbId) {
+  try {
+    const meta = await omdb.getMetaByImdb(imdbId);
+    if (meta) {
+      health.markSuccess('omdb');
+      return meta;
+    }
+  } catch (err) {
+    console.warn(`[aggregator] OMDb meta failed: ${err.message}`);
+    health.markFailure('omdb');
+  }
+  return { title: `TV Show (${imdbId})` };
+}
+
 async function getShowTorrents(imdbId) {
   try {
     const torrents = await eztv.getShowTorrents(imdbId);
@@ -118,5 +133,6 @@ module.exports = {
   getMovies,
   getMovieByImdb,
   getLatestShows,
-  getShowTorrents
+  getShowTorrents,
+  getShowMeta
 };

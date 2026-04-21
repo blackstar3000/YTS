@@ -3,7 +3,7 @@
 async function raceProviders(providers) {
   return new Promise((resolve, reject) => {
     let finished = false;
-    let errors = 0;
+    let resultsProcessed = 0;
 
     providers.forEach(async (p) => {
       try {
@@ -11,12 +11,15 @@ async function raceProviders(providers) {
 
         if (!finished && result && result.length) {
           finished = true;
-          resolve({ result, name: p.name });
+          return resolve({ result, name: p.name });
         }
       } catch (err) {
-        errors++;
-        if (errors === providers.length) {
-          reject(new Error('All providers failed'));
+        // Treat error as an empty result for the purpose of the race
+      } finally {
+        resultsProcessed++;
+        if (!finished && resultsProcessed === providers.length) {
+          // All providers finished, none returned results
+          resolve({ result: [], name: 'none' });
         }
       }
     });

@@ -2,7 +2,7 @@
 'use strict';
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-const { getMovies, getMovieByImdb, getLatestShows, getShowTorrents } = require('./providers/aggregator');
+const { getMovies, getMovieByImdb, getLatestShows, getShowTorrents, getShowMeta } = require('./providers/aggregator');
 const { cached } = require('./providers/cache');
 
 // ---------------------------------------------------------------------------
@@ -229,6 +229,9 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
   if (type === 'series') {
     try {
+      // Get real show title from aggregator (via OMDb)
+      const showMeta = await cached(`meta:series-title:${imdbId}`, 24 * 60 * 60 * 1000, () => getShowMeta(imdbId));
+
       // Build series meta with video objects per episode from EZTV
       const seasons = await cached(`meta:series:${imdbId}`, 10 * 60 * 1000, () => getShowTorrents(imdbId));
       const videos = [];
@@ -250,7 +253,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
         meta: {
           id:     imdbId,
           type:   'series',
-          name:   `TV Show (${imdbId})`,
+          name:   showMeta ? showMeta.title : `TV Show (${imdbId})`,
           videos,
         },
       };

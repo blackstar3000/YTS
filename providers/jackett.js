@@ -33,6 +33,11 @@ async function getTorrents(imdbId, quality = null) {
 
     const responses = await Promise.allSettled(requests);
 
+    // If every single request failed, throw error so aggregator can mark failure
+    if (responses.every(res => res.status === 'rejected')) {
+      throw new Error('All Jackett indexers failed');
+    }
+
     for (const res of responses) {
       if (res.status === 'fulfilled' && res.value.data) {
         const torrents = res.value.data;
@@ -40,12 +45,12 @@ async function getTorrents(imdbId, quality = null) {
         for (const t of torrents) {
           // Better quality extraction: check both title and description
           const searchString = `${t.title} ${t.description || ''}`;
-          const qualityMatch = searchString.match(/\b(2160p|1080p|720p|480p)\b/i);
+          const qualityMatch = searchString.match(/\\b(2160p|1080p|720p|480p)\\b/i);
           const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : 'Unknown';
 
           if (quality && extractedQuality !== quality) continue;
 
-          const typeMatch = searchString.match(/\b(BluRay|WEB-DL|HDRip|BRRip)\b/i);
+          const typeMatch = searchString.match(/\\b(BluRay|WEB-DL|HDRip|BRRip)\\b/i);
 
           results.push({
             quality: extractedQuality,
@@ -63,7 +68,7 @@ async function getTorrents(imdbId, quality = null) {
     return results;
   } catch (err) {
     console.error(`❌ Jackett provider error: ${err.message}`);
-    return [];
+    throw err; // Propagate error to aggregator
   }
 }
 

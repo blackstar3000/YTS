@@ -1,17 +1,36 @@
 'use strict';
 
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 
 const CACHE_FILE = path.join(__dirname, 'cache.json');
+const MAX_CACHE_SIZE = 1000;
 let cache = {};
+let savePending = false;
 
-try {
-  cache = JSON.parse(fs.readFileSync(CACHE_FILE));
-} catch {}
+async function initCache() {
+  try {
+    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    cache = JSON.parse(data);
+  } catch {}
+}
 
-function saveCache() {
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache));
+initCache();
+
+async function saveCache() {
+  if (savePending) return;
+  savePending = true;
+
+  // Debounce writes slightly to avoid disk thrashing
+  setTimeout(async () => {
+    try {
+      await fs.writeFile(CACHE_FILE, JSON.stringify(cache));
+    } catch (err) {
+      console.error('❌ Cache write error:', err.message);
+    } finally {
+      savePending = false;
+    }
+  }, 500);
 }
 
 async function cached(key, ttlMs, fn) {
@@ -19,11 +38,22 @@ async function cached(key, ttlMs, fn) {
   const entry = cache[key];
 
   if (entry && (now - entry.ts < ttlMs)) {
+    // Update timestamp for LRU
+    entry.ts = now;
     return entry.value;
   }
 
   try {
     const value = await fn();
+
+    // LRU Eviction: If cache too large, remove oldest entry
+    if (Object.keys(cache).length >= MAX_CACHE_SIZE) {
+      const oldestKey = Object.keys(cache).reduce((a, b) =>
+        cache[a].ts < cache[b].ts ? a : b
+      );
+      delete cache[oldestKey];
+    }
+
     cache[key] = { ts: now, value };
     saveCache();
     return value;
