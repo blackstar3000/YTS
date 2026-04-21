@@ -16,7 +16,7 @@ async function getTorrents(imdbId, quality = null) {
     return [];
   }
 
-  const indexers = ['1337x', 'torrentia', 'thepiratebay'];
+  const indexers = ['1337x', 'torrentia', 'thepiratebay', 'therarbg'];
   const results = [];
 
   try {
@@ -86,6 +86,45 @@ async function getMovieByImdb(imdbId) {
   };
 }
 
+/**
+ * Get TV show torrents and group them by season and episode.
+ * Returns: { "1": { "1": [torrents], "2": [torrents] }, "2": { ... } }
+ */
+async function getShowTorrents(imdbId) {
+  const torrents = await getTorrents(imdbId);
+  if (torrents.length === 0) return {};
+
+  const seasons = {};
+
+  for (const t of torrents) {
+    const title = t.title || '';
+
+    // Regex to match S01E01 or Season 1 Episode 1
+    const sMatch = title.match(/S(\d+)/i) || title.match(/Season\s*(\d+)/i);
+    const eMatch = title.match(/E(\d+)/i) || title.match(/Episode\s*(\d+)/i);
+
+    if (!sMatch || !eMatch) continue;
+
+    const s = String(parseInt(sMatch[1]) || 1);
+    const e = String(parseInt(eMatch[1]) || 1);
+
+    if (!seasons[s]) seasons[s] = {};
+    if (!seasons[s][e]) seasons[s][e] = [];
+
+    seasons[s][e].push({
+      title: t.title,
+      magnet: t.magnet,
+      hash: t.hash,
+      seeds: t.seeds,
+      peers: t.peers,
+      size: t.size,
+      quality: t.quality,
+    });
+  }
+
+  return seasons;
+}
+
 // For catalog search (simulated as Jackett is best for specific IDs)
 async function listMovies(params) {
   console.warn('⚠️ Jackett listMovies is not fully supported (requires specific queries)');
@@ -94,6 +133,7 @@ async function listMovies(params) {
 
 module.exports = {
   getMovieByImdb,
+  getShowTorrents,
   listMovies,
   getTorrents,
 };

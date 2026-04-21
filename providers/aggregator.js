@@ -112,6 +112,18 @@ async function getShowTorrents(imdbId) {
     console.warn(`[aggregator] EZTV show torrents failed: ${err.message}`);
     health.markFailure('eztv');
   }
+
+  try {
+    const torrents = await jackett.getShowTorrents(imdbId);
+    if (torrents && Object.keys(torrents).length > 0) {
+      health.markSuccess('jackett');
+      return torrents;
+    }
+  } catch (err) {
+    console.warn(`[aggregator] Jackett show torrents failed: ${err.message}`);
+    health.markFailure('jackett');
+  }
+
   return fallback.getShowTorrents(imdbId);
 }
 
