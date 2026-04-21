@@ -23,7 +23,7 @@ const manifest = {
   version: '2.0.0',
   name: 'YTS + EZTV',
   description: 'Movies from YTS (720p/1080p/4K) + TV Series from EZTV — all via magnet links',
-  logo:       'https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Logo-YTS.svg/320px-Logo-YTS.svg.png',
+  logo:       'https://upload.wikimedia.org/wikipedia/commons/1/18/YTS_logo.png',
   background: 'https://ytstv.bz/assets/images/background.jpg',
 
   resources: ['catalog', 'meta', 'stream'],
