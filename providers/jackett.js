@@ -7,7 +7,7 @@ const axios = require('axios');
  * Fetches torrents from a Jackett instance using a set of configured indexers.
  */
 
-async function getTorrents(imdbId, quality = null) {
+async function getTorrents(imdbId, title = null, quality = null) {
   const baseUrl = process.env.JACKETT_URL || 'http://localhost:9117';
   const apiKey = process.env.JACKETT_API_KEY;
 
@@ -19,31 +19,26 @@ async function getTorrents(imdbId, quality = null) {
   const indexers = ['rutor', 'rutracker', 'thepiratebay', 'therarbg'];
   const results = [];
 
-  try {
+  // Helper to execute requests and parse results
+  async function executeSearch(params) {
     const requests = indexers.map(indexer => {
       const url = `${baseUrl}/api/v2.0/indexers/${indexer}/results`;
       return axios.get(url, {
         params: {
           apikey: apiKey,
-          imdbid: imdbId,
+          ...params,
         },
         timeout: 10000,
       });
     });
 
     const responses = await Promise.allSettled(requests);
-
-    // If every single request failed, throw error so aggregator can mark failure
-    if (responses.every(res => res.status === 'rejected')) {
-      throw new Error('All Jackett indexers failed');
-    }
+    const found = [];
 
     for (const res of responses) {
       if (res.status === 'fulfilled' && res.value.data) {
         const torrents = res.value.data;
-
         for (const t of torrents) {
-          // Better quality extraction: check both title and description
           const searchString = `${t.title} ${t.description || ''}`;
           const qualityMatch = searchString.match(/\b(2160p|1080p|720p|480p)\b/i);
           const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : (searchString.match(/hd|720|1080/i) ? '720p' : '480p');
@@ -51,8 +46,7 @@ async function getTorrents(imdbId, quality = null) {
           if (quality && extractedQuality !== quality) continue;
 
           const typeMatch = searchString.match(/\b(BluRay|WEB-DL|HDRip|BRRip)\b/i);
-
-          results.push({
+          found.push({
             quality: extractedQuality,
             type: typeMatch ? typeMatch[0] : 'web',
             size: t.size || 'Unknown',
@@ -64,24 +58,45 @@ async function getTorrents(imdbId, quality = null) {
         }
       }
     }
+    return found;
+  }
 
-    return results;
+  try {
+    // 1. Try IMDb ID Search (Precise)
+    if (imdbId) {
+      console.log(`[Jackett] Attempting IMDb search: ${imdbId}`);
+      const idResults = await executeSearch({ imdbid: imdbId.replace(/^tt/, '') });
+      if (idResults.length > 0) {
+        console.log(`[Jackett] Found ${idResults.length} results via IMDb ID.`);
+        return idResults;
+      }
+    }
+
+    // 2. Try Text Search Fallback (Broader)
+    if (title) {
+      console.log(`[Jackett] IMDb search failed. Falling back to text search: "${title}"`);
+      const textResults = await executeSearch({ q: title });
+      if (textResults.length > 0) {
+        console.log(`[Jackett] Found ${textResults.length} results via text search.`);
+        return textResults;
+      }
+    }
+
+    return [];
   } catch (err) {
     console.error(`❌ Jackett provider error: ${err.message}`);
-    throw err; // Propagate error to aggregator
+    throw err;
   }
 }
 
 // Map to the expected "Movie" format for the aggregator/index.js
-async function getMovieByImdb(imdbId) {
-  const torrents = await getTorrents(imdbId);
+async function getMovieByImdb(imdbId, title = null) {
+  const torrents = await getTorrents(imdbId, title);
   if (torrents.length === 0) return null;
 
-  // Since Jackett only provides torrents, we return a minimal movie object
-  // that contains the torrents array required by movieToStreams.
   return {
     imdbId,
-    title: 'Jackett Result', // Title will be filled by the aggregator or index.js
+    title: title || 'Jackett Result',
     torrents,
   };
 }

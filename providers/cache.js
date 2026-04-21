@@ -7,15 +7,17 @@ const CACHE_FILE = path.join(__dirname, 'cache.json');
 const MAX_CACHE_SIZE = 1000;
 let cache = {};
 let savePending = false;
+let cacheInitialized = false;
 
 async function initCache() {
   try {
     const data = await fs.readFile(CACHE_FILE, 'utf8');
     cache = JSON.parse(data);
   } catch {}
+  cacheInitialized = true;
 }
 
-initCache();
+const initPromise = initCache();
 
 async function saveCache() {
   if (savePending) return;
@@ -34,6 +36,11 @@ async function saveCache() {
 }
 
 async function cached(key, ttlMs, fn) {
+  // Ensure cache is initialized before proceeding
+  if (!cacheInitialized) {
+    await initPromise;
+  }
+
   const now = Date.now();
   const entry = cache[key];
 

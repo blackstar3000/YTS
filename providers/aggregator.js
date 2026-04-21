@@ -28,20 +28,25 @@ async function getMovies(params) {
     console.warn('⚠️ All providers unhealthy → resetting');
     providers = [
       { name: 'yts', fn: () => yts.listMovies(params) },
-      { name: 'fallback', fn: () => fallback.getMovies(params) }
+      { name: 'fallback', fn: () => fallback.listMovies(params) }
     ];
   }
 
   try {
     const { result, name } = await raceProviders(providers);
 
-    health.markSuccess(name);
-    console.log(`🏆 Winner: ${name}`);
+    if (name !== 'none' && result && result.length) {
+      health.markSuccess(name);
+      console.log(`🏆 Winner: ${name}`);
+      return result;
+    }
 
-    return result;
+    // If result was empty or winner was 'none', we treat it as a failure
+    // and fall through to the catch/fallback block.
+    throw new Error('No results from race');
 
   } catch (err) {
-    console.warn('❌ All providers failed → fallback loop');
+    console.warn('❌ All providers failed or empty → fallback loop');
 
     for (const p of providers) {
       try {
@@ -63,27 +68,44 @@ async function getMovies(params) {
 
 async function getMovieByImdb(imdbId) {
   const allTorrents = [];
-  let providerUsed = 'yts'; // Default
+  let movieMeta = null;
 
-  try {
-    const movieYts = await withTimeout(yts.getMovieByImdb(imdbId), 8000);
+  // Fetch from both YTS and Jackett in parallel
+  const results = await Promise.allSettled([
+    withTimeout(yts.getMovieByImdb(imdbId), 8000),
+    // We pass null for title initially; we'll handle the title fallback below
+  ]);
+
+  // Process YTS result
+  if (results[0].status === 'fulfilled') {
+    const movieYts = results[0].value;
     if (movieYts && movieYts.torrents) {
       allTorrents.push(...movieYts.torrents);
+      movieMeta = movieYts; // Preserve rich YTS metadata
       health.markSuccess('yts');
     }
-  } catch (err) {
-    console.warn(`[aggregator] YTS movie failed: ${err.message}`);
+  } else {
+    console.warn(`[aggregator] YTS movie failed: ${results[0].reason?.message}`);
     health.markFailure('yts');
   }
 
+  // Now we determine the best title to use for Jackett search
+  let bestTitle = movieMeta ? movieMeta.title : null;
+  if (!bestTitle) {
+    try {
+      const meta = await withTimeout(omdb.getMetaByImdb(imdbId), 5000);
+      if (meta) bestTitle = meta.title;
+    } catch (err) {
+      console.warn(`[aggregator] OMDb title fetch failed: ${err.message}`);
+    }
+  }
+
+  // Fetch from Jackett using the best available title
   try {
-    const movieJackett = await withTimeout(jackett.getMovieByImdb(imdbId), 8000);
+    const movieJackett = await withTimeout(jackett.getMovieByImdb(imdbId, bestTitle), 8000);
     if (movieJackett && movieJackett.torrents) {
       allTorrents.push(...movieJackett.torrents);
       health.markSuccess('jackett');
-      // If we got Jackett results, we mark the provider as jackett
-      // (since we merge, the a mix of both is present)
-      providerUsed = 'jackett';
     }
   } catch (err) {
     console.warn(`[aggregator] Jackett movie failed: ${err.message}`);
@@ -94,10 +116,19 @@ async function getMovieByImdb(imdbId) {
     return fallback.getMovieByImdb(imdbId);
   }
 
+  // If we have YTS metadata, use it. Otherwise, create a minimal object.
+  if (movieMeta) {
+    return {
+      ...movieMeta,
+      torrents: allTorrents,
+      provider: 'merged'
+    };
+  }
+
   return {
     imdbId,
-    title: 'Aggregated Result',
-    provider: providerUsed,
+    title: bestTitle || 'Aggregated Result',
+    provider: 'jackett',
     torrents: allTorrents
   };
 }
