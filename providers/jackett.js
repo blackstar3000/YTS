@@ -46,7 +46,7 @@ async function getTorrents(imdbId, quality = null) {
           // Better quality extraction: check both title and description
           const searchString = `${t.title} ${t.description || ''}`;
           const qualityMatch = searchString.match(/\b(2160p|1080p|720p|480p)\b/i);
-          const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : 'Unknown';
+          const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : (searchString.match(/hd|720|1080/i) ? '720p' : '480p');
 
           if (quality && extractedQuality !== quality) continue;
 

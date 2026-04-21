@@ -10,9 +10,13 @@ async function listMovies() {
   return [];
 }
 
-async function getMovieByImdb() {
+async function getMovieByImdb(imdbId) {
   console.log('🟡 Fallback provider active: getMovieByImdb');
-  return null;
+  return {
+    imdbId,
+    title: 'Fallback Result',
+    torrents: []
+  };
 }
 
 async function getLatestShows() {
