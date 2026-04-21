@@ -3,6 +3,7 @@
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const { getMovies, getMovieByImdb, getLatestShows, getShowTorrents } = require('./providers/aggregator');
+const { cached } = require('./providers/cache');
 
 // ---------------------------------------------------------------------------
 // Genres
@@ -102,18 +103,18 @@ const manifest = {
 // ---------------------------------------------------------------------------
 // TTL Cache
 // ---------------------------------------------------------------------------
-const cache = new Map();
-function cached(key, ttlMs, fn) {
-  const now = Date.now();
-  if (cache.has(key)) {
-    const { ts, value } = cache.get(key);
-    if (now - ts < ttlMs) return Promise.resolve(value);
-  }
-  return Promise.resolve(fn()).then(value => {
-    cache.set(key, { ts: now, value });
-    return value;
-  });
-}
+// const cache = new Map();
+// function cached(key, ttlMs, fn) {
+//   const now = Date.now();
+//   if (cache.has(key)) {
+//     const { ts, value } = cache.get(key);
+//     if (now - ts < ttlMs) return Promise.resolve(value);
+//   }
+//   return Promise.resolve(fn()).then(value => {
+//     cache.set(key, { ts: now, value });
+//     return value;
+//   });
+// }
 
 // ---------------------------------------------------------------------------
 // Helpers
