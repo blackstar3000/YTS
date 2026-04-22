@@ -41,7 +41,7 @@ async function getTorrents(imdbId, title = null, timeout = 15000) {
   }
 
   function getAttr(xml, name) {
-    // Matches name="x" value="y" or value="y" name="x" (case-insensitive)
+    // Matches torznab:attr or attr elements with name/value pairs (case-insensitive, handles namespace prefix)
     const re = new RegExp('name=["\']' + name + '["\']\\s+value=["\']([^"\']*)["\']|value=["\']([^"\']*)["\']\\s+name=["\']' + name + '["\']', 'i');
     const m = xml.match(re);
     return m ? decodeEntities((m[1] || m[2] || '').trim()) : '';
@@ -108,9 +108,12 @@ async function getTorrents(imdbId, title = null, timeout = 15000) {
         continue;
       }
 
-      const sizeRaw = getAttr(item, 'size') || getAttr(item, 'Size') || '';
-      const sizeGB  = sizeRaw && !isNaN(parseInt(sizeRaw))
-        ? `${(parseInt(sizeRaw) / (1024 ** 3)).toFixed(2)} GB`
+      const sizeRaw = getAttr(item, 'size') || getAttr(item, 'Size') || getTag(item, 'size') || '';
+      // Also try enclosure length attribute: <enclosure length="123456" />
+      const enclosureMatch = item.match(/enclosure[^>]+length=["'](\d+)["']/);
+      const sizeBytes = sizeRaw || (enclosureMatch ? enclosureMatch[1] : '');
+      const sizeGB = sizeBytes && !isNaN(parseInt(sizeBytes))
+        ? `${(parseInt(sizeBytes) / (1024 ** 3)).toFixed(2)} GB`
         : 'Unknown';
 
       const seeds = parseInt(getAttr(item, 'seeders') || getAttr(item, 'Seeders') || '0');
