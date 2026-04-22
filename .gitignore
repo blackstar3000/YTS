@@ -1,34 +1,26 @@
-# Gradle files
-.gradle/
-build/
+# Claude settings
+.claude/
 
-# Local configuration file (sdk path, etc)
-local.properties
+# Dependencies
+node_modules/
 
-# Log/OS Files
+# Local SDK copy (not needed, use npm package)
+stremio-addon-sdk-1.1.4/
+
+# Environment variables (keep private)
+.env
+
+# Cache (auto-generated)
+providers/cache.json
+
+# Logs
 *.log
+npm-debug.log*
 
-# Android Studio generated files and folders
-captures/
-.externalNativeBuild/
-.cxx/
-*.aab
-*.apk
-output-metadata.json
+# VS Code
+.vscode/
+.vs/
 
-# IntelliJ
-*.iml
-.idea/
-misc.xml
-deploymentTargetDropDown.xml
-render.experimental.xml
-
-# Keystore files
-*.jks
-*.keystore
-
-# Google Services (e.g. APIs or Firebase)
-google-services.json
-
-# Android Profiling
-*.hprof
+# OS files
+.DS_Store
+Thumbs.db

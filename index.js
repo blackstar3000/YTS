@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+require('dotenv').config();
+
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const { getMovies, getMovieByImdb, getLatestShows, getShowTorrents, getShowMeta } = require('./providers/aggregator');
 const { cached } = require('./providers/cache');
@@ -146,11 +148,12 @@ function movieToStreams(m) {
       // after merging, so we label based on general source if it looks like YTS
       // or just use a generic "Multi-Source" label.
       // But for the test, let's just use a consolidated label.
+      const sourceLabel = t.provider === 'jackett' ? 'Jackett' : 'YTS';
       return {
-        name:  `Source ${t.quality}`,
-        title: `🎬 [Multi-Source] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
-        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-        externalUrl: t.magnet,
+        name:  `${sourceLabel} ${t.quality}`,
+        title: `🎬 [${sourceLabel}] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
+        infoHash:    t.hash   ? t.hash.toLowerCase() : undefined,
+        externalUrl: !t.hash  ? t.magnet             : undefined,
         behaviorHints: { bingeGroup: `agg-${m.imdbId}` },
       };
     });
@@ -226,7 +229,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
   if (type === 'movie') {
     try {
-      const movie = await cached(`meta:movie:${imdbId}`, 10 * 60 * 1000, () => getMovieByImdb(imdbId));
+      const movie = await cached(`movie:${imdbId}`, 10 * 60 * 1000, () => getMovieByImdb(imdbId));
       return { meta: movie ? movieToMeta(movie) : null };
     } catch (err) {
       console.error('[meta/movie]', err.message);
@@ -285,7 +288,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
   if (type === 'movie') {
     try {
-      const movie = await cached(`streams:movie:${imdbId}`, 10 * 60 * 1000, () => getMovieByImdb(imdbId));
+      const movie = await cached(`movie:${imdbId}`, 10 * 60 * 1000, () => getMovieByImdb(imdbId));
       return { streams: movie ? movieToStreams(movie) : [], cacheMaxAge: 3600 };
     } catch (err) {
       console.error('[stream/movie]', err.message);

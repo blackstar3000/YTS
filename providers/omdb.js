@@ -8,7 +8,11 @@ const axios = require('axios');
  */
 
 async function getMetaByImdb(imdbId) {
-  const apiKey = process.env.OMDB_API_KEY || '633989b';
+  const apiKey = process.env.OMDB_API_KEY;
+  if (!apiKey) {
+    console.warn('⚠️ OMDB_API_KEY is not set. Skipping OMDb lookup.');
+    return null;
+  }
   const url = `https://www.omdbapi.com/`;
 
   try {

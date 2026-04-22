@@ -5,6 +5,7 @@ const fallback = require('./fallback');
 const jackett = require('./jackett');
 const eztv = require('./eztv');
 const omdb = require('./omdb');
+const { cached } = require('./cache');
 const { raceProviders } = require('./race');
 const health = require('./health');
 
@@ -69,46 +70,59 @@ async function getMovies(params) {
 async function getMovieByImdb(imdbId) {
   const allTorrents = [];
   let movieMeta = null;
+  let jackettTitle = null;
 
-  // Fetch from both YTS and Jackett in parallel
-  const results = await Promise.allSettled([
-    withTimeout(yts.getMovieByImdb(imdbId), 8000),
-    // We pass null for title initially; we'll handle the title fallback below
-  ]);
+  // Start OMDb title lookup in background (non-blocking), with caching
+  const omdbPromise = cached(`omdb:title:${imdbId}`, 24 * 60 * 60 * 1000, () => omdb.getMetaByImdb(imdbId))
+    .then(meta => { if (meta && meta.title) jackettTitle = meta.title; })
+    .catch(() => {});
+
+  // Fetch YTS with timeout
+  let ytsResult;
+  try {
+    ytsResult = await withTimeout(yts.getMovieByImdb(imdbId), 6000);
+  } catch (err) {
+    console.warn(`[aggregator] YTS movie failed: ${err.message}`);
+    health.markFailure('yts');
+    ytsResult = null;
+  }
 
   // Process YTS result
-  if (results[0].status === 'fulfilled') {
-    const movieYts = results[0].value;
+  if (ytsResult) {
+    const movieYts = ytsResult;
     if (movieYts && movieYts.torrents) {
       allTorrents.push(...movieYts.torrents);
-      movieMeta = movieYts; // Preserve rich YTS metadata
+      movieMeta = movieYts;
+      jackettTitle = movieYts.title; // Use YTS title for Jackett
       health.markSuccess('yts');
     }
-  } else {
-    console.warn(`[aggregator] YTS movie failed: ${results[0].reason?.message}`);
-    health.markFailure('yts');
   }
 
-  // Now we determine the best title to use for Jackett search
-  let bestTitle = movieMeta ? movieMeta.title : null;
-  if (!bestTitle) {
-    try {
-      const meta = await withTimeout(omdb.getMetaByImdb(imdbId), 5000);
-      if (meta) bestTitle = meta.title;
-    } catch (err) {
-      console.warn(`[aggregator] OMDb title fetch failed: ${err.message}`);
-    }
+  // If YTS failed, wait briefly for OMDb title before Jackett search
+  if (!jackettTitle) {
+    await Promise.race([
+      omdbPromise,
+      new Promise(resolve => setTimeout(resolve, 3000))
+    ]);
   }
 
-  // Fetch from Jackett using the best available title
-  try {
-    const movieJackett = await withTimeout(jackett.getMovieByImdb(imdbId, bestTitle), 8000);
-    if (movieJackett && movieJackett.torrents) {
-      allTorrents.push(...movieJackett.torrents);
+  // Fetch from Jackett in parallel using the title we have
+  const jackettPromise = jackett.getMovieByImdb(imdbId, jackettTitle, 15000);
+
+  const [jackettResult] = await Promise.allSettled([jackettPromise]);
+
+  if (jackettResult.status === 'fulfilled') {
+    const movieJackett = jackettResult.value;
+    if (movieJackett && movieJackett.torrents && movieJackett.torrents.length > 0) {
+      // Tag each torrent so the stream label knows the source
+      const tagged = movieJackett.torrents.map(t => ({ ...t, provider: 'jackett' }));
+      allTorrents.push(...tagged);
       health.markSuccess('jackett');
     }
-  } catch (err) {
-    console.warn(`[aggregator] Jackett movie failed: ${err.message}`);
+    // Empty result is normal (movie not indexed) — don't penalize
+  } else {
+    // Only penalize on actual errors (network failure, crash, etc.)
+    console.warn(`[aggregator] Jackett error: ${jackettResult.reason?.message}`);
     health.markFailure('jackett');
   }
 
@@ -127,7 +141,7 @@ async function getMovieByImdb(imdbId) {
 
   return {
     imdbId,
-    title: bestTitle || 'Aggregated Result',
+    title: jackettTitle || 'Aggregated Result',
     provider: 'jackett',
     torrents: allTorrents
   };
@@ -149,7 +163,7 @@ async function getShowMeta(imdbId) {
 
 async function getShowTorrents(imdbId) {
   try {
-    const torrents = await eztv.getShowTorrents(imdbId);
+    const torrents = await withTimeout(eztv.getShowTorrents(imdbId), 6000);
     if (torrents && Object.keys(torrents).length > 0) {
       health.markSuccess('eztv');
       return torrents;
@@ -160,7 +174,7 @@ async function getShowTorrents(imdbId) {
   }
 
   try {
-    const torrents = await jackett.getShowTorrents(imdbId);
+    const torrents = await withTimeout(jackett.getShowTorrents(imdbId, 5000), 6000);
     if (torrents && Object.keys(torrents).length > 0) {
       health.markSuccess('jackett');
       return torrents;

@@ -3,152 +3,182 @@
 const axios = require('axios');
 
 /**
- * Jackett Provider
- * Fetches torrents from a Jackett instance using a set of configured indexers.
+ * Jackett Provider — uses Torznab API with IMDb ID search
  */
 
-async function getTorrents(imdbId, title = null, quality = null) {
+async function getTorrents(imdbId, title = null, timeout = 15000) {
   const baseUrl = process.env.JACKETT_URL || 'http://localhost:9117';
-  const apiKey = process.env.JACKETT_API_KEY;
+  const apiKey  = process.env.JACKETT_API_KEY;
 
   if (!apiKey) {
     console.warn('⚠️ JACKETT_API_KEY is not set. Skipping Jackett provider.');
     return [];
   }
 
-  const indexers = ['rutor', 'rutracker', 'thepiratebay', 'therarbg'];
-  const results = [];
+  // --- XML helpers (no external parser needed) ---
 
-  // Helper to execute requests and parse results
+  function decodeEntities(str) {
+    return str
+      .replace(/&amp;/g,  '&')
+      .replace(/&lt;/g,   '<')
+      .replace(/&gt;/g,   '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g,  "'");
+  }
+
+  function getTag(xml, tag) {
+    // Matches <tag ...>CDATA or plain text</tag>
+    const cdataRe = new RegExp('<' + tag + '[^>]*><!\\[CDATA\\[[\\s\\S]*?\\]\\]><\\/' + tag + '>');
+    const plainRe = new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)<\\/' + tag + '>');
+
+    const cdataM = xml.match(cdataRe);
+    if (cdataM) {
+      const inner = cdataM[0].replace(/<[^>]+>/, '').replace(/<\/[^>]+>$/, '');
+      return decodeEntities(inner.replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '').trim());
+    }
+    const plainM = xml.match(plainRe);
+    return plainM ? decodeEntities(plainM[1].trim()) : '';
+  }
+
+  function getAttr(xml, name) {
+    // Matches name="x" value="y" or value="y" name="x" (case-insensitive)
+    const re = new RegExp('name=["\']' + name + '["\']\\s+value=["\']([^"\']*)["\']|value=["\']([^"\']*)["\']\\s+name=["\']' + name + '["\']', 'i');
+    const m = xml.match(re);
+    return m ? decodeEntities((m[1] || m[2] || '').trim()) : '';
+  }
+
   async function executeSearch(params) {
-    const requests = indexers.map(indexer => {
-      const url = `${baseUrl}/api/v2.0/indexers/${indexer}/results`;
-      return axios.get(url, {
-        params: {
-          apikey: apiKey,
-          ...params,
-        },
-        timeout: 10000,
+    console.log(`[Jackett Debug] Searching with params:`, JSON.stringify(params));
+    const url = `${baseUrl}/api/v2.0/indexers/all/results/torznab/api`;
+    let res;
+    try {
+      res = await axios.get(url, {
+        params: { apikey: apiKey, ...params },
+        timeout,
+        headers: { 'Accept': 'application/xml, text/xml' },
       });
-    });
+    } catch (err) {
+      console.error(`[Jackett Debug] Request failed: ${err.message}`);
+      return [];
+    }
 
-    const responses = await Promise.allSettled(requests);
+    const xml   = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+    const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+    console.log(`[Jackett Debug] Torznab returned ${items.length} items`);
+
     const found = [];
 
-    for (const res of responses) {
-      if (res.status === 'fulfilled' && res.value.data) {
-        const torrents = res.value.data;
-        for (const t of torrents) {
-          const searchString = `${t.title} ${t.description || ''}`;
-          const qualityMatch = searchString.match(/\b(2160p|1080p|720p|480p)\b/i);
-          const extractedQuality = qualityMatch ? qualityMatch[0].toLowerCase() : (searchString.match(/hd|720|1080/i) ? '720p' : '480p');
+    for (const item of items) {
+      const torrentTitle = getTag(item, 'title');
 
-          if (quality && extractedQuality !== quality) continue;
+      // Skip TV episodes
+      if (/\bS\d{1,2}E\d{1,2}\b/i.test(torrentTitle) || /\bSeason\s*\d+/i.test(torrentTitle)) {
+        continue;
+      }
 
-          const typeMatch = searchString.match(/\b(BluRay|WEB-DL|HDRip|BRRip)\b/i);
-          found.push({
-            quality: extractedQuality,
-            type: typeMatch ? typeMatch[0] : 'web',
-            size: t.size || 'Unknown',
-            seeds: t.seeders || 0,
-            peers: t.peers || 0,
-            hash: t.hash,
-            magnet: t.magnet,
-          });
+      // Quality filter — skip 480p and unknown
+      const qualityMatch = torrentTitle.match(/\b(2160p|1080p|720p|480p)\b/i);
+      const quality = qualityMatch
+        ? qualityMatch[0].toLowerCase()
+        : (/\b(hd|720|1080)\b/i.test(torrentTitle) ? '720p' : null);
+
+      if (!quality || quality === '480p') {
+        console.log(`[Jackett] Filtered (${quality || 'unknown'}): ${torrentTitle}`);
+        continue;
+      }
+
+      // Extract magnet — try torznab attr first, then <guid>
+      let magnet = getAttr(item, 'magneturl') || getAttr(item, 'MagnetUrl');
+      let hash   = getAttr(item, 'infohash')  || getAttr(item, 'InfoHash');
+
+      if (!magnet) {
+        const guid = getTag(item, 'guid');
+        if (guid.startsWith('magnet:')) {
+          magnet = guid;
         }
       }
+
+      if (!hash && magnet) {
+        const hashMatch = magnet.match(/urn:btih:([a-fA-F0-9]{32,40})/i);
+        if (hashMatch) hash = hashMatch[1];
+      }
+
+      if (!magnet && !hash) {
+        // Some indexers (e.g. TorrentGalaxy) only provide a page URL in <guid>, not a magnet — skip silently
+        continue;
+      }
+
+      const sizeRaw = getAttr(item, 'size') || getAttr(item, 'Size') || '';
+      const sizeGB  = sizeRaw && !isNaN(parseInt(sizeRaw))
+        ? `${(parseInt(sizeRaw) / (1024 ** 3)).toFixed(2)} GB`
+        : 'Unknown';
+
+      const seeds = parseInt(getAttr(item, 'seeders') || getAttr(item, 'Seeders') || '0');
+      const peers = parseInt(getAttr(item, 'peers')   || getAttr(item, 'Peers')   || '0');
+
+      const typeMatch = torrentTitle.match(/\b(BluRay|WEB-DL|HDRip|BRRip|Remux)\b/i);
+
+      console.log(`[Jackett] Accepted (${quality}): ${torrentTitle}`);
+
+      found.push({
+        quality,
+        type:   typeMatch ? typeMatch[0] : 'web',
+        size:   sizeGB,
+        seeds,
+        peers,
+        hash,
+        magnet,
+      });
     }
+
     return found;
   }
 
-  try {
-    // 1. Try IMDb ID Search (Precise)
-    if (imdbId) {
-      console.log(`[Jackett] Attempting IMDb search: ${imdbId}`);
-      const idResults = await executeSearch({ imdbid: imdbId.replace(/^tt/, '') });
-      if (idResults.length > 0) {
-        console.log(`[Jackett] Found ${idResults.length} results via IMDb ID.`);
-        return idResults;
+  // IMDb ID search only — text search returns too many unrelated results
+  if (imdbId) {
+    console.log(`[Jackett] Searching by IMDb ID: ${imdbId}`);
+    try {
+      const results = await executeSearch({ t: 'movie', imdbid: imdbId, cat: '2000' });
+      if (results.length > 0) {
+        console.log(`[Jackett] Found ${results.length} results via IMDb ID.`);
+        return results;
       }
+      console.log(`[Jackett] No results found for IMDb ID: ${imdbId}`);
+    } catch (err) {
+      console.error(`❌ Jackett provider error: ${err.message}`);
     }
-
-    // 2. Try Text Search Fallback (Broader)
-    if (title) {
-      console.log(`[Jackett] IMDb search failed. Falling back to text search: "${title}"`);
-      const textResults = await executeSearch({ q: title });
-      if (textResults.length > 0) {
-        console.log(`[Jackett] Found ${textResults.length} results via text search.`);
-        return textResults;
-      }
-    }
-
-    return [];
-  } catch (err) {
-    console.error(`❌ Jackett provider error: ${err.message}`);
-    throw err;
-  }
-}
-
-// Map to the expected "Movie" format for the aggregator/index.js
-async function getMovieByImdb(imdbId, title = null) {
-  const torrents = await getTorrents(imdbId, title);
-  if (torrents.length === 0) return null;
-
-  return {
-    imdbId,
-    title: title || 'Jackett Result',
-    torrents,
-  };
-}
-
-/**
- * Get TV show torrents and group them by season and episode.
- * Returns: { "1": { "1": [torrents], "2": [torrents] }, "2": { ... } }
- */
-async function getShowTorrents(imdbId) {
-  const torrents = await getTorrents(imdbId);
-  if (torrents.length === 0) return {};
-
-  const seasons = {};
-
-  for (const t of torrents) {
-    const title = t.title || '';
-
-    // Regex to match S01E01 or Season 1 Episode 1
-    const sMatch = title.match(/S(\d+)/i) || title.match(/Season\s*(\d+)/i);
-    const eMatch = title.match(/E(\d+)/i) || title.match(/Episode\s*(\d+)/i);
-
-    if (!sMatch || !eMatch) continue;
-
-    const s = String(parseInt(sMatch[1]) || 1);
-    const e = String(parseInt(eMatch[1]) || 1);
-
-    if (!seasons[s]) seasons[s] = {};
-    if (!seasons[s][e]) seasons[s][e] = [];
-
-    seasons[s][e].push({
-      title: t.title,
-      magnet: t.magnet,
-      hash: t.hash,
-      seeds: t.seeds,
-      peers: t.peers,
-      size: t.size,
-      quality: t.quality,
-    });
   }
 
-  return seasons;
-}
-
-// For catalog search (simulated as Jackett is best for specific IDs)
-async function listMovies(params) {
-  console.warn('⚠️ Jackett listMovies is not fully supported (requires specific queries)');
   return [];
 }
 
-module.exports = {
-  getMovieByImdb,
-  getShowTorrents,
-  listMovies,
-  getTorrents,
-};
+async function getMovieByImdb(imdbId, title = null, timeout = 15000) {
+  const torrents = await getTorrents(imdbId, title, timeout);
+  if (!torrents.length) return null;
+  return { imdbId, title: title || 'Jackett Result', torrents };
+}
+
+async function getShowTorrents(imdbId, timeout = 15000) {
+  const torrents = await getTorrents(imdbId, null, timeout);
+  if (!torrents.length) return {};
+
+  const seasons = {};
+  for (const t of torrents) {
+    const sMatch = (t.title || '').match(/S(\d+)/i);
+    const eMatch = (t.title || '').match(/E(\d+)/i);
+    if (!sMatch || !eMatch) continue;
+
+    const s = String(parseInt(sMatch[1]));
+    const e = String(parseInt(eMatch[1]));
+    if (!seasons[s]) seasons[s] = {};
+    if (!seasons[s][e]) seasons[s][e] = [];
+    seasons[s][e].push(t);
+  }
+  return seasons;
+}
+
+async function listMovies() {
+  return [];
+}
+
+module.exports = { getMovieByImdb, getShowTorrents, listMovies, getTorrents };

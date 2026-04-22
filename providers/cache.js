@@ -65,7 +65,9 @@ async function cached(key, ttlMs, fn) {
     saveCache();
     return value;
   } catch (err) {
-    if (entry) {
+    // Serve stale cache on error, but only if it's less than 1 hour old
+    const MAX_STALE_MS = 60 * 60 * 1000;
+    if (entry && (now - entry.ts < MAX_STALE_MS)) {
       console.warn('⚠️ Using stale cache for', key);
       return entry.value;
     }
