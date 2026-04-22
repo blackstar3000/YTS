@@ -2,19 +2,15 @@
 
 const axios = require('axios');
 
-// YTS mirrors — UPDATED 2024 working mirrors
+// YTS mirrors — verified working
 const YTS_BASES = [
-  'https://yts.mx/api/v2',
-  'https://yts.lt/api/v2',
-  'https://yts.am/api/v2',
-  'https://yts.gg/api/v2',
-  'https://yts.unblockit.nz/api/v2',
-  'https://yts.torrentbay.st/api/v2',
-  'https://www1.yts-official.org/api/v2',
-  'https://en.yts-official.org/api/v2',
-  'https://yts1.mx/api/v2',
-  'https://yts.proxyninja.org/api/v2',
-  'https://yts.rs/api/v2'
+  //'https://yts.lt/api.accel.li/api/v2/',
+  //'https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&language=en-US&api_key=9e5740ad1ac975679728bae65307824c',
+  // 'https://yts.tl/api/v2',
+  // 'https://yts.pm/api/v2',
+  // 'https://yts.do/api/v2',
+  //'https://yts.proxyninja.net/api/v2/',
+  'https://movies-api.accel.li/api/v2/'
 ];
 
 const TRACKERS = [
@@ -28,6 +24,8 @@ const TRACKERS = [
   'udp://tracker.leechers-paradise.org:6969',
   'udp://exodus.desync.com:6969',
   'udp://tracker.internetwarriors.net:1337/announce',
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
 ].map(t => `&tr=${encodeURIComponent(t)}`).join('');
 
 function buildMagnet(hash, title) {
@@ -47,7 +45,7 @@ async function ytsGet(endpoint, params = {}) {
       
       const res = await axios.get(`${base}/${endpoint}`, {
         params,
-        timeout: 15000, // Increased timeout
+        timeout: 8000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'application/json',
