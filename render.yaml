@@ -8,4 +8,10 @@ services:
     envVars:
       - key: PORT
         value: 10000
+      - key: JACKETT_URL
+        sync: false   # Set manually in Render dashboard — your Cloudflare tunnel URL
+      - key: JACKETT_API_KEY
+        sync: false   # Set manually in Render dashboard
+      - key: OMDB_API_KEY
+        sync: false   # Set manually in Render dashboard
     healthCheckPath: /manifest.json
