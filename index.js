@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
+const path = require('path');
+const fs   = require('fs');
+
 require('dotenv').config();
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
@@ -21,11 +24,11 @@ const MOVIE_GENRES = [
 // Manifest — 6 movie catalogs + 1 series catalog
 // ---------------------------------------------------------------------------
 const manifest = {
-  id: 'community.ytseztv.stremio',
+  id: 'community.phantom.stremio',
   version: '2.0.0',
-  name: 'YTS + EZTV',
-  description: 'Movies from YTS (720p/1080p/4K) + TV Series from EZTV — all via magnet links',
-  logo: 'https://upload.wikimedia.org/wikipedia/commons/1/18/YTS_logo.png',
+  name: 'Phantom',
+  description: 'Movies & TV Series via magnet links — powered by YTS, EZTV & Prowlarr',
+  logo: process.env.ADDON_URL ? `${process.env.ADDON_URL}/logo.png` : 'http://localhost:7000/logo.png',
 
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
@@ -36,7 +39,7 @@ const manifest = {
     {
       id: 'yts-latest',
       type: 'movie',
-      name: '🎬 YTS — Latest',
+      name: '🎬 Phantom — Latest',
       extra: [
         { name: 'search', isRequired: false },
         { name: 'skip',   isRequired: false },
@@ -46,7 +49,7 @@ const manifest = {
     {
       id: 'yts-top-rated',
       type: 'movie',
-      name: '⭐ YTS — Top Rated',
+      name: '⭐ Phantom — Top Rated',
       extra: [
         { name: 'skip',  isRequired: false },
         { name: 'genre', isRequired: false, options: MOVIE_GENRES },
@@ -55,7 +58,7 @@ const manifest = {
     {
       id: 'yts-trending',
       type: 'movie',
-      name: '🔥 YTS — Trending',
+      name: '🔥 Phantom — Trending',
       extra: [
         { name: 'skip',  isRequired: false },
         { name: 'genre', isRequired: false, options: MOVIE_GENRES },
@@ -64,7 +67,7 @@ const manifest = {
     {
       id: 'yts-4k',
       type: 'movie',
-      name: '🎥 YTS — 4K Ultra HD',
+      name: '🎥 Phantom — 4K Ultra HD',
       extra: [
         { name: 'skip',  isRequired: false },
         { name: 'genre', isRequired: false, options: MOVIE_GENRES },
@@ -73,7 +76,7 @@ const manifest = {
     {
       id: 'yts-hindi',
       type: 'movie',
-      name: '🇮🇳 YTS — Bollywood / Hindi',
+      name: '🇮🇳 Phantom — Bollywood / Hindi',
       extra: [
         { name: 'skip',   isRequired: false },
         { name: 'search', isRequired: false },
@@ -82,7 +85,7 @@ const manifest = {
     {
       id: 'yts-recent-high-rated',
       type: 'movie',
-      name: '🏆 YTS — Recent & Highly Rated',
+      name: '🏆 Phantom — Recent & Highly Rated',
       extra: [
         { name: 'skip',  isRequired: false },
         { name: 'genre', isRequired: false, options: MOVIE_GENRES },
@@ -92,7 +95,7 @@ const manifest = {
     {
       id: 'eztv-latest',
       type: 'series',
-      name: '📺 EZTV — Latest Episodes',
+      name: '📺 Phantom — Latest Episodes',
       extra: [
         { name: 'skip', isRequired: false },
       ],
@@ -141,20 +144,32 @@ function movieToStreams(m) {
   if (!m.torrents || !m.torrents.length) return [];
   const qOrder = { '2160p': 4, '1080p': 3, '720p': 2, '480p': 1 };
 
+  // Detect HDR/DV tags from torrent title for quality label
+  function getQualityLabel(t) {
+    const title = (t.title || '').toUpperCase();
+    const q = t.quality || '';
+    const tags = [];
+    if (/\bDV\b|DOLBY.?VISION/i.test(title))  tags.push('DV');
+    if (/HDR10\+/i.test(title))                tags.push('HDR10+');
+    else if (/\bHDR\b/i.test(title))           tags.push('HDR');
+    const label = q === '2160p' ? '4k' : q;
+    return tags.length ? `${label} ${tags.join(' | ')}` : label;
+  }
+
   return [...m.torrents]
     .sort((a, b) => (qOrder[b.quality] || 0) - (qOrder[a.quality] || 0) || b.seeds - a.seeds)
     .map(t => {
-      // We can't easily know which individual torrent came from where
-      // after merging, so we label based on general source if it looks like YTS
-      // or just use a generic "Multi-Source" label.
-      // But for the test, let's just use a consolidated label.
-      const sourceLabel = t.provider === 'jackett' ? 'Jackett' : 'YTS';
+      const isYTS     = t.provider !== 'jackett';
+      const source    = isYTS ? 'YTS' : (t.indexer || 'Prowlarr');
+      const titleLine = t.title || m.title || '';
+      const shortTitle = titleLine.length > 50 ? titleLine.slice(0, 50) + '…' : titleLine;
+
       return {
-        name:  `${sourceLabel} ${t.quality}`,
-        title: `🎬 [${sourceLabel}] ${m.title}\n${t.quality} | ${t.type ? t.type.toUpperCase() : ''} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
+        name:  `Phantom\n${getQualityLabel(t)}`,
+        title: `${shortTitle}\n👤 ${t.seeds}  💾 ${t.size}  ⚙️ ${source}`,
         infoHash:    t.hash   ? t.hash.toLowerCase() : undefined,
         externalUrl: !t.hash  ? t.magnet             : undefined,
-        behaviorHints: { bingeGroup: `agg-${m.imdbId}` },
+        behaviorHints: { bingeGroup: `phantom-${m.imdbId}` },
       };
     });
 }
@@ -321,11 +336,29 @@ builder.defineStreamHandler(async ({ type, id }) => {
 // Start
 // ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port: PORT });
+const addonInterface = builder.getInterface();
 
-console.log('\n🎬  YTS + EZTV Stremio Addon is running!');
+// Serve logo.png statically
+const http = require('http');
+const originalHandler = addonInterface.handler;
+addonInterface.handler = (req, res) => {
+  if (req.url === '/logo.png') {
+    const logoPath = path.join(__dirname, 'Stremio logo.png');
+    fs.readFile(logoPath, (err, data) => {
+      if (err) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(data);
+    });
+    return;
+  }
+  originalHandler(req, res);
+};
+
+serveHTTP(addonInterface, { port: PORT });
+
+console.log('\n👻  Phantom is running!');
 console.log(`    Manifest : http://localhost:${PORT}/manifest.json`);
 console.log(`    Install  : stremio://localhost:${PORT}/manifest.json\n`);
 console.log('Catalogs:');
-console.log('  Movies  → YTS Latest, Top Rated, Trending, 4K, Bollywood, Recent High Rated');
-console.log('  Series  → EZTV Latest Episodes\n');
+console.log('  Movies  → Latest, Top Rated, Trending, 4K, Bollywood, Recent High Rated');
+console.log('  Series  → Latest Episodes\n');

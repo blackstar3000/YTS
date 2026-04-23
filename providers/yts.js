@@ -89,6 +89,7 @@ function formatMovie(m) {
       peers:   t.peers || 0,
       hash:    t.hash,
       magnet:  buildMagnet(t.hash, m.title_long || m.title),
+      title:   `${m.title_english || m.title} (${m.year}) ${t.quality}`,
     };
   }).filter(Boolean); // Remove null entries
   

@@ -7,7 +7,7 @@ const axios = require('axios');
  */
 
 async function getTorrents(imdbId, title = null, timeout = 15000) {
-  const baseUrl = process.env.JACKETT_URL || 'http://localhost:9117';
+  const baseUrl = process.env.JACKETT_URL || 'http://localhost:9696';
   const apiKey  = process.env.JACKETT_API_KEY;
 
   if (!apiKey) {
@@ -47,92 +47,70 @@ async function getTorrents(imdbId, title = null, timeout = 15000) {
     return m ? decodeEntities((m[1] || m[2] || '').trim()) : '';
   }
 
-  async function executeSearch(params) {
-    console.log(`[Jackett Debug] Searching with params:`, JSON.stringify(params));
-    const url = `${baseUrl}/api/v2.0/indexers/all/results/torznab/api`;
-    let res;
-    try {
-      res = await axios.get(url, {
-        params: { apikey: apiKey, ...params },
-        timeout,
-        headers: { 'Accept': 'application/xml, text/xml' },
-      });
-    } catch (err) {
-      console.error(`[Jackett Debug] Request failed: ${err.message}`);
-      return [];
-    }
+async function executeSearch(params) {
+  const imdbId = params.imdbid;
+  console.log(`[Prowlarr Debug] Searching for IMDb: ${imdbId}`);
+  
+  const url = `${baseUrl}/api/v1/search`;
+  
+  let res;
+  try {
+    res = await axios.get(url, {
+      params: {
+        query: imdbId,
+        categories: [2000],  // Movies
+        type: 'movie'
+      },
+      timeout,
+      headers: { 
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      },
+    });
+  } catch (err) {
+    console.error(`[Prowlarr Debug] Request failed: ${err.message}`);
+    return [];
+  }
 
-    const xml   = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-    const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+    const items = res.data;
     console.log(`[Jackett Debug] Torznab returned ${items.length} items`);
 
     const found = [];
 
-    for (const item of items) {
-      const torrentTitle = getTag(item, 'title');
+for (const item of items) {
+  const torrentTitle = item.title;
 
-      // Skip TV episodes
-      if (/\bS\d{1,2}E\d{1,2}\b/i.test(torrentTitle) || /\bSeason\s*\d+/i.test(torrentTitle)) {
-        continue;
-      }
+  if (!torrentTitle) continue;
 
-      // Quality filter — skip 480p and unknown
-      const qualityMatch = torrentTitle.match(/\b(2160p|1080p|720p|480p)\b/i);
-      const quality = qualityMatch
-        ? qualityMatch[0].toLowerCase()
-        : (/\b(hd|720|1080)\b/i.test(torrentTitle) ? '720p' : null);
+  if (/\bS\d{1,2}E\d{1,2}\b/i.test(torrentTitle)) continue;
 
-      if (!quality || quality === '480p') {
-        console.log(`[Jackett] Filtered (${quality || 'unknown'}): ${torrentTitle}`);
-        continue;
-      }
+  const qualityMatch = torrentTitle.match(/\b(2160p|1080p|720p|480p)\b/i);
+  const quality = qualityMatch ? qualityMatch[0].toLowerCase() : null;
 
-      // Extract magnet — try torznab attr first, then <guid>
-      let magnet = getAttr(item, 'magneturl') || getAttr(item, 'MagnetUrl');
-      let hash   = getAttr(item, 'infohash')  || getAttr(item, 'InfoHash');
+  if (!quality || quality === '480p') continue;
 
-      if (!magnet) {
-        const guid = getTag(item, 'guid');
-        if (guid.startsWith('magnet:')) {
-          magnet = guid;
-        }
-      }
+  const magnet = item.magnetUrl;
+  const hash   = item.infoHash;
 
-      if (!hash && magnet) {
-        const hashMatch = magnet.match(/urn:btih:([a-fA-F0-9]{32,40})/i);
-        if (hashMatch) hash = hashMatch[1];
-      }
+  const sizeGB = item.size
+    ? `${(item.size / (1024 ** 3)).toFixed(2)} GB`
+    : 'Unknown';
 
-      if (!magnet && !hash) {
-        // Some indexers (e.g. TorrentGalaxy) only provide a page URL in <guid>, not a magnet — skip silently
-        continue;
-      }
+  const seeds = item.seeders || 0;
+  const peers = item.leechers || 0;
 
-      const sizeRaw = getAttr(item, 'size') || getAttr(item, 'Size') || getTag(item, 'size') || '';
-      // Also try enclosure length attribute: <enclosure length="123456" />
-      const enclosureMatch = item.match(/enclosure[^>]+length=["'](\d+)["']/);
-      const sizeBytes = sizeRaw || (enclosureMatch ? enclosureMatch[1] : '');
-      const sizeGB = sizeBytes && !isNaN(parseInt(sizeBytes))
-        ? `${(parseInt(sizeBytes) / (1024 ** 3)).toFixed(2)} GB`
-        : 'Unknown';
-
-      const seeds = parseInt(getAttr(item, 'seeders') || getAttr(item, 'Seeders') || '0');
-      const peers = parseInt(getAttr(item, 'peers')   || getAttr(item, 'Peers')   || '0');
-
-      const typeMatch = torrentTitle.match(/\b(BluRay|WEB-DL|HDRip|BRRip|Remux)\b/i);
-
-      console.log(`[Jackett] Accepted (${quality}): ${torrentTitle}`);
-
-      found.push({
-        quality,
-        type:   typeMatch ? typeMatch[0] : 'web',
-        size:   sizeGB,
-        seeds,
-        peers,
-        hash,
-        magnet,
-      });
-    }
+  found.push({
+    quality,
+    type: 'web',
+    size: sizeGB,
+    seeds,
+    peers,
+    hash,
+    magnet,
+    indexer: item.indexer || 'Prowlarr',
+    title: item.title || '',
+  });
+}
 
     return found;
   }
@@ -141,7 +119,7 @@ async function getTorrents(imdbId, title = null, timeout = 15000) {
   if (imdbId) {
     console.log(`[Jackett] Searching by IMDb ID: ${imdbId}`);
     try {
-      const results = await executeSearch({ t: 'movie', imdbid: imdbId, cat: '2000' });
+      const results = await executeSearch({ imdbid: imdbId });
       if (results.length > 0) {
         console.log(`[Jackett] Found ${results.length} results via IMDb ID.`);
         return results;
