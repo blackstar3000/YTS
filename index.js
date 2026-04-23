@@ -28,7 +28,7 @@ const manifest = {
   version: '2.0.0',
   name: 'Phantom',
   description: 'Movies & TV Series via magnet links — powered by YTS, EZTV & Prowlarr',
-  logo: process.env.ADDON_URL ? `${process.env.ADDON_URL}/logo.png` : 'http://localhost:7000/logo.png',
+  logo: 'https://hosting.photobucket.com/26a6037f-4bda-4fe6-a73d-662dc9064777/892c5dcb-091d-4082-900c-4e3febc820c8.png',
 
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
