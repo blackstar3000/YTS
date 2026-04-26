@@ -1,9 +1,9 @@
-'use strict';
+"use strict";
 
-const fs = require('fs').promises;
-const path = require('path');
+const fs = require("fs").promises;
+const path = require("path");
 
-const CACHE_FILE = path.join(__dirname, 'cache.json');
+const CACHE_FILE = path.join(__dirname, "cache.json");
 const MAX_CACHE_SIZE = 1000;
 let cache = {};
 let savePending = false;
@@ -12,7 +12,7 @@ const inFlight = new Map(); // deduplicates concurrent fetches for the same key
 
 async function initCache() {
   try {
-    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    const data = await fs.readFile(CACHE_FILE, "utf8");
     cache = JSON.parse(data);
   } catch {}
   cacheInitialized = true;
@@ -27,7 +27,7 @@ async function saveCache() {
     try {
       await fs.writeFile(CACHE_FILE, JSON.stringify(cache));
     } catch (err) {
-      console.error('❌ Cache write error:', err.message);
+      console.error("❌ Cache write error:", err.message);
     } finally {
       savePending = false;
     }
@@ -41,7 +41,7 @@ async function cached(key, ttlMs, fn) {
   const entry = cache[key];
 
   // Return fresh cache hit immediately
-  if (entry && (now - entry.ts < ttlMs)) {
+  if (entry && now - entry.ts < ttlMs) {
     entry.ts = now;
     return entry.value;
   }
@@ -58,7 +58,7 @@ async function cached(key, ttlMs, fn) {
       // LRU eviction
       if (Object.keys(cache).length >= MAX_CACHE_SIZE) {
         const oldestKey = Object.keys(cache).reduce((a, b) =>
-          cache[a].ts < cache[b].ts ? a : b
+          cache[a].ts < cache[b].ts ? a : b,
         );
         delete cache[oldestKey];
       }
@@ -69,8 +69,8 @@ async function cached(key, ttlMs, fn) {
     } catch (err) {
       // Serve stale cache on error, but only if less than 1 hour old
       const MAX_STALE_MS = 60 * 60 * 1000;
-      if (entry && (Date.now() - entry.ts < MAX_STALE_MS)) {
-        console.warn('⚠️ Using stale cache for', key);
+      if (entry && Date.now() - entry.ts < MAX_STALE_MS) {
+        console.warn("⚠️ Using stale cache for", key);
         return entry.value;
       }
       throw err;

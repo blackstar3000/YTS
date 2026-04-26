@@ -1,6 +1,6 @@
-'use strict';
+"use strict";
 
-const axios = require('axios');
+const axios = require("axios");
 
 /**
  * OMDb Provider
@@ -10,7 +10,7 @@ const axios = require('axios');
 async function getMetaByImdb(imdbId) {
   const apiKey = process.env.OMDB_API_KEY;
   if (!apiKey) {
-    console.warn('⚠️ OMDB_API_KEY is not set. Skipping OMDb lookup.');
+    console.warn("⚠️ OMDB_API_KEY is not set. Skipping OMDb lookup.");
     return null;
   }
   const url = `https://www.omdbapi.com/`;
@@ -26,7 +26,7 @@ async function getMetaByImdb(imdbId) {
 
     const data = res.data;
 
-    if (data.Response === 'False') {
+    if (data.Response === "False") {
       return null;
     }
 
@@ -35,9 +35,9 @@ async function getMetaByImdb(imdbId) {
       year: data.Year,
       rating: data.imdbRating,
       description: data.Plot,
-      genres: data.Genre ? data.Genre.split(', ') : [],
+      genres: data.Genre ? data.Genre.split(", ") : [],
       runtime: data.Runtime ? parseInt(data.Runtime) : undefined,
-      poster: data.Poster !== 'N/A' ? data.Poster : null,
+      poster: data.Poster !== "N/A" ? data.Poster : null,
     };
   } catch (err) {
     console.error(`❌ OMDb provider error: ${err.message}`);

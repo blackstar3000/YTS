@@ -1,179 +1,168 @@
-'use strict';
+"use strict";
 
-const axios = require('axios');
+const axios = require("axios");
 
-// YTS mirrors — verified working
+// Configuration
+const TIMEOUT_MS = 7000; // Slightly less than aggregator's 8000ms wrapper
+const LIMIT_PER_PAGE = 20;
+
+// YTS mirrors (most stable first)
 const YTS_BASES = [
-  //'https://yts.lt/api.accel.li/api/v2/',
-  //'https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&language=en-US&api_key=9e5740ad1ac975679728bae65307824c',
-  // 'https://yts.tl/api/v2',
-  // 'https://yts.pm/api/v2',
-  // 'https://yts.do/api/v2',
-  //'https://yts.proxyninja.net/api/v2/',
-  'https://movies-api.accel.li/api/v2/'
+  "https://movies-api.accel.li/api/v2/",
+  "https://yts.mx/api/v2/",
+  "https://yts.unblockit.cat/api/v2/",
 ];
 
+// Maintained tracker list (removed known dead trackers)
 const TRACKERS = [
-  'udp://open.demonii.com:1337/announce',
-  'udp://tracker.openbittorrent.com:80',
-  'udp://tracker.coppersurfer.tk:6969',
-  'udp://glotorrents.pw:6969/announce',
-  'udp://tracker.opentrackr.org:1337/announce',
-  'udp://torrent.gresille.org:80/announce',
-  'udp://p4p.arenabg.ch:1337',
-  'udp://tracker.leechers-paradise.org:6969',
-  'udp://exodus.desync.com:6969',
-  'udp://tracker.internetwarriors.net:1337/announce',
-  'udp://tracker.opentrackr.org:1337/announce',
-  'udp://tracker.torrent.eu.org:451/announce',
-].map(t => `&tr=${encodeURIComponent(t)}`).join('');
+  "udp://open.demonii.com:1337/announce",
+  "udp://tracker.openbittorrent.com:80",
+  "udp://tracker.opentrackr.org:1337/announce",
+  "udp://torrent.gresille.org:80/announce",
+  "udp://p4p.arenabg.ch:1337",
+  "udp://tracker.leechers-paradise.org:6969",
+  "udp://exodus.desync.com:6969",
+  "udp://tracker.internetwarriors.net:1337/announce",
+  "udp://tracker.torrent.eu.org:451/announce",
+  "udp://tracker.dler.org:6969/announce",
+  "udp://tracker.port443.xyz:6969/announce",
+]
+  .map((t) => `&tr=${encodeURIComponent(t)}`)
+  .join("");
+
+// Axios instance for reuse
+const apiClient = axios.create({
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Accept: "application/json",
+  },
+  timeout: TIMEOUT_MS,
+});
+
+async function ytsGet(endpoint, params = {}) {
+  let lastErr;
+
+  for (const base of YTS_BASES) {
+    try {
+      const res = await apiClient.get(`${base}/${endpoint}`, { params });
+
+      if (res.data && res.data.status === "ok") {
+        return res.data.data;
+      }
+    } catch (err) {
+      lastErr = err;
+      // Debug logging only (disable in production or use logging library)
+      // console.warn(`[yts] ${base} failed: ${err.code || err.message}`);
+    }
+  }
+
+  throw lastErr || new Error("All YTS mirrors failed");
+}
 
 function buildMagnet(hash, title) {
   if (!hash) {
-    console.error('❌ buildMagnet: missing hash for', title);
+    console.error(`[yts] ❌ buildMagnet: missing hash for "${title}"`);
     return null;
   }
   return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(title)}${TRACKERS}`;
 }
 
-async function ytsGet(endpoint, params = {}) {
-  let lastErr;
-  
-  for (const base of YTS_BASES) {
-    try {
-      console.log(`🔍 Trying YTS mirror: ${base}`);
-      
-      const res = await axios.get(`${base}/${endpoint}`, {
-        params,
-        timeout: 8000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-      });
-      
-      console.log(`✅ ${base} responded with status: ${res.data?.status}`);
-      
-      if (res.data && res.data.status === 'ok') {
-        console.log(`✅ Success with ${base}`);
-        return res.data.data;
-      }
-      
-    } catch (err) {
-      lastErr = err;
-      console.warn(`⚠️  [yts] ${base} failed: ${err.message}`);
-    }
-  }
-  
-  console.error('❌ All YTS mirrors failed!');
-  throw lastErr || new Error('All YTS mirrors failed');
-}
-
 function formatMovie(m) {
   if (!m) {
-    console.error('❌ formatMovie: received null/undefined movie');
+    console.error("[yts] ❌ formatMovie: received null/undefined movie");
     return null;
   }
-  
-  const torrents = (m.torrents || []).map(t => {
-    if (!t.hash) {
-      console.warn(`⚠️  Missing hash for ${m.title} ${t.quality}`);
-      return null;
-    }
-    
-    return {
-      quality: t.quality,
-      type:    t.type || 'web',
-      size:    t.size || 'Unknown',
-      seeds:   t.seeds || 0,
-      peers:   t.peers || 0,
-      hash:    t.hash,
-      magnet:  buildMagnet(t.hash, m.title_long || m.title),
-      title:   `${m.title_english || m.title} (${m.year}) ${t.quality}`,
-    };
-  }).filter(Boolean); // Remove null entries
-  
-  if (torrents.length === 0) {
-    console.warn(`⚠️  No valid torrents for ${m.title}`);
-  }
-  
+
+  const torrents = (m.torrents || [])
+    .map((t) => {
+      if (!t.hash) {
+        console.warn(`[yts] ⚠️ Missing hash for ${m.title} ${t.quality}`);
+        return null;
+      }
+
+      return {
+        quality: t.quality,
+        type: t.type || "web",
+        size: t.size || "Unknown",
+        seeds: t.seeds || 0,
+        peers: t.peers || 0,
+        hash: t.hash,
+        magnet: buildMagnet(t.hash, m.title_long || m.title),
+        title: `${m.title_english || m.title} (${m.year}) ${t.quality}`,
+        provider: "yts", // ✅ Tag source for aggregator
+      };
+    })
+    .filter(Boolean);
+
   return {
-    ytsId:      m.id,
-    imdbId:     m.imdb_code,
-    title:      m.title_english || m.title,
-    year:       m.year,
-    rating:     m.rating,
-    runtime:    m.runtime,
-    genres:     m.genres || [],
-    summary:    m.synopsis || m.description_full || '',
-    language:   m.language,
-    mpaRating:  m.mpa_rating,
-    ytTrailer:  m.yt_trailer_code,
-    poster:     m.large_cover_image  || m.medium_cover_image || '',
-    background: m.background_image_original || m.background_image || '',
+    ytsId: m.id,
+    imdbId: m.imdb_code,
+    title: m.title_english || m.title,
+    year: m.year,
+    rating: m.rating,
+    runtime: m.runtime,
+    genres: m.genres || [],
+    summary: m.synopsis || m.description_full || "",
+    language: m.language,
+    mpaRating: m.mpa_rating,
+    ytTrailer: m.yt_trailer_code,
+    poster: m.large_cover_image || m.medium_cover_image || "",
+    background: m.background_image_original || m.background_image || "",
     torrents,
+    provider: "yts", // ✅ Tag source for aggregator
   };
 }
 
-async function listMovies({ query, genre, page = 1, limit = 20, sortBy = 'date_added', minRating = 0, quality } = {}) {
+async function listMovies({
+  query,
+  genre,
+  page = 1,
+  limit = LIMIT_PER_PAGE,
+  sortBy = "date_added",
+  minRating = 0,
+  quality,
+} = {}) {
+  const params = {
+    limit,
+    page,
+    sort_by: sortBy,
+    order_by: "desc",
+    minimum_rating: minRating,
+  };
+
+  if (query) params.query_term = query;
+  if (genre) params.genre = genre;
+  if (quality) params.quality = quality;
+
   try {
-    const params = { 
-      limit, 
-      page, 
-      sort_by: sortBy, 
-      order_by: 'desc', 
-      minimum_rating: minRating 
-    };
-    
-    if (query)   params.query_term = query;
-    if (genre)   params.genre = genre;
-    if (quality) params.quality = quality;
-    
-    console.log('🎬 YTS Query:', params);
-    
-    const data = await ytsGet('list_movies.json', params);
-    
+    const data = await ytsGet("list_movies.json", params);
+
     if (!data.movies || data.movies.length === 0) {
-      console.warn('⚠️  No movies returned from YTS');
       return [];
     }
-    
-    console.log(`✅ Found ${data.movies.length} movies`);
-    
+
     return data.movies.map(formatMovie).filter(Boolean);
   } catch (err) {
-    console.error('❌ listMovies error:', err.message);
+    console.error(`[yts] listMovies error: ${err.message}`);
     return [];
   }
 }
 
 async function getMovieByImdb(imdbId) {
   try {
-    console.log(`🔍 Fetching YTS movie: ${imdbId}`);
-    
-    const data = await ytsGet('list_movies.json', { 
-      query_term: imdbId, 
-      limit: 1 
+    const data = await ytsGet("list_movies.json", {
+      query_term: imdbId,
+      limit: 1,
     });
-    
+
     if (!data.movies || data.movies.length === 0) {
-      console.warn(`⚠️  No movie found for ${imdbId}`);
       return null;
     }
-    
-    const movie = formatMovie(data.movies[0]);
-    
-    if (!movie) {
-      console.error(`❌ Failed to format movie ${imdbId}`);
-      return null;
-    }
-    
-    console.log(`✅ Found movie: ${movie.title} with ${movie.torrents.length} torrents`);
-    
-    return movie;
-    
+
+    return formatMovie(data.movies[0]);
   } catch (err) {
-    console.error(`❌ getMovieByImdb(${imdbId}) error:`, err.message);
+    console.error(`[yts] getMovieByImdb(${imdbId}) error: ${err.message}`);
     return null;
   }
 }

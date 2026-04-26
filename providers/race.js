@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 async function raceProviders(providers) {
   return new Promise((resolve, reject) => {
@@ -19,7 +19,7 @@ async function raceProviders(providers) {
         resultsProcessed++;
         if (!finished && resultsProcessed === providers.length) {
           // All providers finished, none returned results
-          resolve({ result: [], name: 'none' });
+          resolve({ result: [], name: "none" });
         }
       }
     });

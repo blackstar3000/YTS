@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 const health = new Map();
 
@@ -21,7 +21,7 @@ function isHealthy(name) {
   if (!h) return true;
 
   // Auto-recover after 5 minutes since last failure
-  if (h.score <= -5 && h.lastFail && (Date.now() - h.lastFail > 5 * 60 * 1000)) {
+  if (h.score <= -5 && h.lastFail && Date.now() - h.lastFail > 5 * 60 * 1000) {
     console.log(`♻️  Health reset for ${name} after cooldown`);
     h.score = 0;
     health.set(name, h);
@@ -32,12 +32,12 @@ function isHealthy(name) {
 }
 
 function getScore(name) {
-  return (health.get(name)?.score) || 0;
+  return health.get(name)?.score || 0;
 }
 
 module.exports = {
   markSuccess,
   markFailure,
   isHealthy,
-  getScore
+  getScore,
 };
