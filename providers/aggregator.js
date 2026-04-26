@@ -9,6 +9,7 @@ const { cached } = require("./cache");
 const { raceProviders } = require("./race");
 const health = require("./health");
 const { parseRelease } = require("./sceneParser");
+const axios = require("axios");
 
 function withTimeout(promise, ms = 8000) {
   return Promise.race([
