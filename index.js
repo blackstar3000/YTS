@@ -303,7 +303,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
       // Build series meta with video objects per episode from EZTV
       const seasons = await cached(
-        `series:${imdbId}`,
+        `meta:series:${imdbId}`,
         10 * 60 * 1000,
         () => getShowTorrents(imdbId),
       );
@@ -364,21 +364,18 @@ builder.defineStreamHandler(async ({ type, id }) => {
   if (type === "series" && season !== null && episode !== null) {
     try {
       const seasons = await cached(
-        `series:${imdbId}`,
+        `streams:series:${imdbId}`,
         10 * 60 * 1000,
         () => getShowTorrents(imdbId),
       );
       const eps = (seasons[String(season)] || {})[String(episode)] || [];
-      const streams = eps.map((t) => {
-        const source = t.provider === 'eztv' ? 'EZTV' : (t.indexer || 'Prowlarr');
-        return {
-          name: `Phantom\n${t.quality}`,
-          title: `${t.title ? t.title.slice(0, 60) : `S${String(season).padStart(2,'0')}E${String(episode).padStart(2,'0')}`}\n👤 ${t.seeds}  💾 ${t.size || ''}  ⚙️ ${source}`,
-          infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-          externalUrl: !t.hash ? t.magnet : undefined,
-          behaviorHints: { bingeGroup: `phantom-${imdbId}` },
-        };
-      });
+      const streams = eps.map((t) => ({
+        name: `EZTV ${t.quality}`,
+        title: `📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n${t.quality} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
+        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
+        externalUrl: t.magnet,
+        behaviorHints: { bingeGroup: `eztv-${imdbId}` },
+      }));
       return { streams, cacheMaxAge: 3600 };
     } catch (err) {
       console.error("[stream/series]", err.message);
