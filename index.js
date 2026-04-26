@@ -196,7 +196,7 @@ function movieToStreams(m) {
         name: `Phantom\n${getQualityLabel(t)}`,
         title: `${shortTitle}\n🌱 ${t.seeds}  💀 ${t.size}  📀 ${source}`,
         infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-        externalUrl: !t.hash ? t.magnet : undefined,
+        // DO NOT set externalUrl – it would open a browser
         behaviorHints: { bingeGroup: `phantom-${m.imdbId}` },
       };
     });
@@ -354,7 +354,48 @@ builder.defineStreamHandler(async ({ type, id }) => {
       const movie = await cached(`movie:${imdbId}`, 10 * 60 * 1000, () =>
         getMovieByImdb(imdbId),
       );
-      return { streams: movie ? movieToStreams(movie) : [], cacheMaxAge: 3600 };
+      if (!movie || !movie.torrents || movie.torrents.length === 0) {
+        return { streams: [], cacheMaxAge: 3600 };
+      }
+
+      // Filter and prepare movie streams
+      const streams = movie.torrents
+        .filter((t) => {
+          // Keep only if we have a valid infoHash (hash field) or a magnet that is a magnet link with hash
+          if (t.hash) return true;
+          if (t.magnet && t.magnet.startsWith("magnet:")) {
+            // Extract hash from magnet if possible
+            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
+            if (match) {
+              t.hash = match[1];
+              return true;
+            }
+          }
+          return false;
+        })
+        .map((t) => {
+          let infoHash = t.hash;
+          // If hash still missing but magnet exists, try again
+          if (!infoHash && t.magnet && t.magnet.startsWith("magnet:")) {
+            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
+            if (match) infoHash = match[1];
+          }
+          const isYTS = t.provider !== "jackett";
+          const source = isYTS ? "YTS" : t.indexer || "Prowlarr";
+          const titleLine = t.title || "";
+          const shortTitle =
+            titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
+          return {
+            name: `Phantom\n${t.quality}`,
+            title: `${shortTitle}\n🌱 ${t.seeds}  💀 ${t.size}  📀 ${source}`,
+            infoHash: infoHash ? infoHash.toLowerCase() : undefined,
+            // DO NOT set externalUrl – it would open a browser
+            behaviorHints: { bingeGroup: `phantom-${imdbId}` },
+          };
+        })
+        .filter((s) => s.infoHash); // final safety: only streams with hash
+
+      return { streams, cacheMaxAge: 3600 };
     } catch (err) {
       console.error("[stream/movie]", err.message);
       return { streams: [], cacheMaxAge: 3600 };
@@ -369,13 +410,47 @@ builder.defineStreamHandler(async ({ type, id }) => {
         () => getShowTorrents(imdbId),
       );
       const eps = (seasons[String(season)] || {})[String(episode)] || [];
-      const streams = eps.map((t) => ({
-        name: `EZTV ${t.quality}`,
-        title: `📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n${t.quality} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${t.peers} peers`,
-        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-        externalUrl: t.magnet,
-        behaviorHints: { bingeGroup: `eztv-${imdbId}` },
-      }));
+
+      const streams = eps
+        .filter((t) => {
+          // Keep only if we have a valid infoHash (hash) or a magnet link with hash
+          if (t.hash) return true;
+          if (t.magnet && t.magnet.startsWith("magnet:")) {
+            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
+            if (match) {
+              t.hash = match[1];
+              return true;
+            }
+          }
+          return false;
+        })
+        .map((t) => {
+          let infoHash = t.hash;
+          if (!infoHash && t.magnet && t.magnet.startsWith("magnet:")) {
+            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
+            if (match) infoHash = match[1];
+          }
+          // Determine provider name
+          let providerName = "Unknown";
+          if (t.provider === "eztv") providerName = "EZTV";
+          else if (t.provider === "jackett")
+            providerName = t.indexer || "Prowlarr";
+          else if (t.indexer) providerName = t.indexer;
+          else providerName = t.provider || "Phantom";
+          const titleLine = t.title || "";
+          const shortTitle =
+            titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
+
+          return {
+            name: `Phantom\n${t.quality}`,
+            title: `${shortTitle}📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n${t.quality} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${providerName}`,
+            infoHash: infoHash ? infoHash.toLowerCase() : undefined,
+            // No externalUrl – force torrent playback
+            behaviorHints: { bingeGroup: `eztv-${imdbId}` },
+          };
+        })
+        .filter((s) => s.infoHash); // only streams with hash
+
       return { streams, cacheMaxAge: 3600 };
     } catch (err) {
       console.error("[stream/series]", err.message);

@@ -3,157 +3,97 @@
 const axios = require("axios");
 const { parseRelease } = require("./sceneParser");
 
-// ============================================================================
-// Configuration & Validation
-// ============================================================================
-
+// ================= CONFIG =================
 const CONFIG = Object.freeze({
   jackett: {
     baseUrl:
       process.env.JACKETT_URL?.replace(/\/$/, "") || "http://localhost:9696",
     apiKey: process.env.JACKETT_API_KEY,
-    timeout: parseInt(process.env.JACKETT_TIMEOUT, 10) || 30000,
+    timeout: parseInt(process.env.JACKETT_TIMEOUT, 10) || 20000,
     maxRetries: parseInt(process.env.JACKETT_MAX_RETRIES, 10) || 2,
-    retryDelay: parseInt(process.env.JACKETT_RETRY_DELAY, 10) || 1000,
+    retryDelay: parseInt(process.env.JACKETT_RETRY_DELAY, 10) || 800,
     categories: { movie: [2000], tv: [5000] },
     maxResults: 50,
   },
-  scoring: {
-    resolution: { "2160p": 50, "1080p": 30, "720p": 10 },
-    source: { REMUX: 80, BluRay: 50, "WEB-DL": 30, WEBRip: 20 },
-    hdr: { "Dolby Vision": 40, "HDR10+": 35, HDR: 25 },
-    codec: { x265: 15, x264: 5 },
-    audio: { TrueHD: 20, "DTS-HD": 15, DTS: 10 },
-    remuxBoost: 30,
-    maxSeedScore: 30,
-  },
-  search: {
-    minTitleLength: 2, // Allow short titles like "Up", "It"
-    cleanPatterns: /[^a-zA-Z0-9 ]/g,
-  },
 });
 
-// Validate configuration on load
 if (!CONFIG.jackett.apiKey) {
-  throw new Error("❌ JACKETT_API_KEY environment variable is required");
+  throw new Error("❌ JACKETT_API_KEY is required");
 }
 
-// ============================================================================
-// Types & Interfaces (JSDoc)
-// ============================================================================
-
-/**
- * @typedef {Object} TorrentMeta
- * @property {string} quality - Resolution (e.g., "1080p")
- * @property {string} source - Source type (e.g., "REMUX")
- * @property {string} codec - Video codec (e.g., "x265")
- * @property {string} hdr - HDR type (e.g., "HDR10+")
- * @property {string} audio - Audio format (e.g., "TrueHD")
- */
-
-/**
- * @typedef {Object} TorrentResult
- * @property {TorrentMeta} meta
- * @property {string} size - Formatted size string
- * @property {number} seeds - Seed count
- * @property {number} peers - Peer count
- * @property {string} hash - Torrent info hash
- * @property {string} magnet - Magnet URI
- * @property {string} indexer - Indexer name
- * @property {string} title - Full torrent title
- * @property {number} score - Calculated quality score
- */
-
-/**
- * @typedef {Object} MovieResult
- * @property {string} imdbId
- * @property {string} title
- * @property {TorrentResult[]} torrents
- */
-
-// ============================================================================
-// Utilities
-// ============================================================================
-
-class JackettError extends Error {
-  constructor(message, cause) {
-    super(message);
-    this.name = "JackettError";
-    this.cause = cause;
-  }
-}
-
-function sanitizeQuery(input) {
-  if (typeof input !== "string") return "";
-  return input.trim().substring(0, 100); // Prevent overly long queries
-}
-
+// ================= UTIL =================
 function normalize(str) {
   return str
     ?.toLowerCase()
-    .replace(CONFIG.search.cleanPatterns, "")
+    .replace(/[^a-z0-9 ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function titleMatches(torrentTitle, targetTitle) {
-  if (!torrentTitle || !targetTitle) return false;
-
+  if (!targetTitle) return true;
   const t1 = normalize(torrentTitle);
   const t2 = normalize(targetTitle);
-
-  // More robust matching: check word inclusion for short titles
-  if (t2.length <= 3) {
-    return t1.split(/\s+/).includes(t2);
-  }
-
   return t1.includes(t2) || t2.includes(t1);
 }
 
-function extractYear(title) {
-  const match = title.match(/\b(19|20)\d{2}\b/);
-  return match ? parseInt(match[0], 10) : null;
+function cleanTitle(title) {
+  return title
+    ?.replace(/[:\-–—]/g, " ")
+    .replace(/[^a-zA-Z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-// ============================================================================
-// Scoring Engine
-// ============================================================================
+// ================= TRACKERS =================
+const TRACKERS = [
+  "udp://tracker.opentrackr.org:1337/announce",
+  "udp://tracker.openbittorrent.com:80",
+  "udp://tracker.torrent.eu.org:451/announce",
+]
+  .map((t) => `&tr=${encodeURIComponent(t)}`)
+  .join("");
 
-function calculateScore(torrent) {
-  const { scoring } = CONFIG;
+function buildMagnet(hash, name) {
+  if (!hash) return null;
+  return `magnet:?xt=urn:btih:${hash.toLowerCase()}&dn=${encodeURIComponent(name)}${TRACKERS}`;
+}
+
+// ================= SCORE =================
+function calculateScore(t) {
   let score = 0;
 
-  // Resolution scoring
-  score += scoring.resolution[torrent.quality] || 0;
+  if (t.quality === "2160p") score += 50;
+  else if (t.quality === "1080p") score += 30;
+  else if (t.quality === "720p") score += 10;
 
-  // Source scoring (with REMUX boost)
-  score += scoring.source[torrent.source] || 0;
-  if (torrent.source === "REMUX") {
-    score += scoring.remuxBoost;
-  }
+  if (t.source === "REMUX") score += 80;
+  else if (t.source === "BluRay") score += 50;
+  else if (t.source === "WEB-DL") score += 30;
+  else if (t.source === "WEBRip") score += 20;
 
-  // HDR scoring
-  score += scoring.hdr[torrent.hdr] || 0;
+  if (t.source === "REMUX") score += 30;
 
-  // Codec scoring
-  score += scoring.codec[torrent.codec] || 0;
+  if (t.hdr === "Dolby Vision") score += 40;
+  else if (t.hdr === "HDR10+") score += 35;
+  else if (t.hdr === "HDR") score += 25;
 
-  // Audio scoring
-  score += scoring.audio[torrent.audio] || 0;
+  if (t.codec === "x265") score += 15;
+  else if (t.codec === "x264") score += 5;
 
-  // Seeds scaling (logarithmic to reduce dominance)
-  score += Math.min(
-    Math.log10(Math.max(torrent.seeds, 1)) * 5,
-    scoring.maxSeedScore,
-  );
+  if (t.audio === "TrueHD") score += 20;
+  else if (t.audio === "DTS-HD") score += 15;
+
+  score += Math.min(Math.log10(Math.max(t.seeds, 1)) * 5, 30);
+
+  if (t.indexer?.toLowerCase().includes("1337x")) score -= 10;
+
+  if (t.quality === "2160p" && t.sizeNum && t.sizeNum < 8) score -= 40;
 
   return Math.round(score);
 }
 
-// ============================================================================
-// Retry & Request Handler
-// ============================================================================
-
+// ================= NETWORK =================
 async function fetchWithRetry(
   url,
   options,
@@ -161,130 +101,83 @@ async function fetchWithRetry(
 ) {
   try {
     return await axios.get(url, options);
-  } catch (error) {
-    if (retries > 0 && axios.isAxiosError(error)) {
-      const delay =
-        CONFIG.jackett.retryDelay *
-        Math.pow(2, CONFIG.jackett.maxRetries - retries);
-      console.warn(
-        `[Provider] Request failed, retrying in ${delay}ms... (${retries} retries left)`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, delay));
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise((r) => setTimeout(r, CONFIG.jackett.retryDelay));
       return fetchWithRetry(url, options, retries - 1);
     }
-    throw error;
+    throw err;
   }
 }
 
-// ============================================================================
-// Search Executor
-// ============================================================================
+async function executeSearch(query, signal) {
+  if (!query) return [];
 
-async function executeSearch(query, type = "movie") {
-  const { baseUrl, apiKey, timeout, categories } = CONFIG.jackett;
-
-  if (!query) {
-    console.debug("[Provider] Skipping empty query");
-    return [];
-  }
-
-  const sanitizedQuery = sanitizeQuery(query);
-  console.log(`[Provider] Searching: ${sanitizedQuery}`);
+  console.log(`[Provider] Searching: ${query}`);
 
   try {
-    const response = await fetchWithRetry(`${baseUrl}/api/v1/search`, {
-      params: {
-        query: sanitizedQuery,
-        categories: categories[type],
-        type,
+    const res = await fetchWithRetry(
+      `${CONFIG.jackett.baseUrl}/api/v1/search`,
+      {
+        params: {
+          query,
+          categories: CONFIG.jackett.categories.movie,
+          type: "movie",
+        },
+        timeout: CONFIG.jackett.timeout,
+        signal,
+        headers: {
+          "X-Api-Key": CONFIG.jackett.apiKey,
+          Accept: "application/json",
+        },
       },
-      timeout,
-      headers: {
-        "X-Api-Key": apiKey,
-        Accept: "application/json",
-        "User-Agent": "JackettProvider/1.0",
-      },
-    });
+    );
 
-    return Array.isArray(response.data) ? response.data : [];
+    return Array.isArray(res.data) ? res.data : [];
   } catch (err) {
-    throw new JackettError(`Search failed for "${query}"`, err);
+    console.error(`[Provider] Search failed (${query}): ${err.message}`);
+    return [];
   }
 }
 
-// ============================================================================
-// Result Processing
-// ============================================================================
-
-function createTorrentKey(item) {
-  // Prefer infoHash, fallback to normalized title + indexer
-  if (item.infoHash) return `hash:${item.infoHash.toLowerCase()}`;
-  const indexer = item.indexer || "unknown";
-  const normalized = normalize(item.title || "");
-  return `title:${indexer}:${normalized.substring(0, 50)}`;
-}
-
-function deduplicateResults(results) {
-  const unique = new Map();
-
-  for (const item of results) {
-    const key = createTorrentKey(item);
-    if (!unique.has(key)) {
-      unique.set(key, item);
-    }
-  }
-
-  return Array.from(unique.values());
-}
-
-function parseAndFilterTorrent(item, { title, year, strict = false }) {
-  const torrentTitle = item.title;
+// ================= PARSER =================
+function parseTorrent(item, title, year) {
+  const torrentTitle = item.title || item.name;
   if (!torrentTitle) return null;
 
-  // Skip TV episodes for movie searches
-  if (/\bS\d{1,2}E\d{1,2}\b/i.test(torrentTitle)) {
-    return null;
-  }
+  if (!titleMatches(torrentTitle, title)) return null;
 
-  // Title matching
-  if (title && !titleMatches(torrentTitle, title)) {
-    if (strict) return null;
-    // In non-strict mode, allow if IMDb ID is present (already searched by ID)
-  }
-
-  // Year matching (if no year in title, allow if it's a high-quality source)
   if (year && !torrentTitle.includes(year.toString())) {
-    const hasQualityIndicator = /remux|bluray|web-?dl|webrip/i.test(
-      torrentTitle,
-    );
-    if (!hasQualityIndicator) {
-      console.debug(`[Provider] Skipping "${torrentTitle}" - year mismatch`);
-      return null;
-    }
+    if (!/remux|bluray/i.test(torrentTitle)) return null;
   }
 
-  const meta = parseRelease(torrentTitle);
+  let meta = parseRelease(torrentTitle);
 
-  // Ensure resolution is detected
   if (!meta.resolution) {
-    const fallback = torrentTitle.match(/\b(2160p|1080p|720p)\b/i);
-    if (fallback) {
-      meta.resolution = fallback[0].toLowerCase();
-    } else {
-      console.debug(`[Provider] Skipping "${torrentTitle}" - no resolution`);
-      return null;
-    }
+    const m = torrentTitle.match(/\b(2160p|1080p|720p)\b/i);
+    if (!m) return null;
+    meta.resolution = m[0].toLowerCase();
   }
 
-  // Validate required fields
-  if (!item.magnetUrl && !item.infoHash) {
-    console.debug(`[Provider] Skipping "${torrentTitle}" - no magnet/hash`);
-    return null;
+  let magnet = null;
+  let infoHash = item.infoHash || item.info_hash || null;
+
+  if (item.magnetUrl && item.magnetUrl.startsWith("magnet:")) {
+    magnet = item.magnetUrl;
   }
 
-  const sizeGB = item.size
-    ? `${(item.size / 1024 ** 3).toFixed(2)} GB`
-    : "Unknown";
+  if (!magnet && item.guid && item.guid.startsWith("magnet:")) {
+    magnet = item.guid;
+  }
+
+  if (!magnet && infoHash) {
+    magnet = buildMagnet(infoHash, torrentTitle);
+  }
+
+  if (!magnet || !magnet.startsWith("magnet:")) return null;
+  if (/^https?:\/\//i.test(magnet)) return null;
+
+  const sizeNum = item.size ? item.size / 1024 ** 3 : 0;
 
   return {
     quality: meta.resolution,
@@ -292,149 +185,163 @@ function parseAndFilterTorrent(item, { title, year, strict = false }) {
     codec: meta.codec,
     hdr: meta.hdr,
     audio: meta.audio,
-    type: "web",
-    size: sizeGB,
+    size: sizeNum ? `${sizeNum.toFixed(2)} GB` : "Unknown",
+    sizeNum,
     seeds: item.seeders || 0,
-    peers: item.leechers || 0,
-    hash: item.infoHash || null,
-    magnet: item.magnetUrl || null,
-    indexer: item.indexer || "Prowlarr",
+    magnet,
+    hash: infoHash, // ✅ FIXED
+    indexer: item.indexer,
     title: torrentTitle,
+
+    label: [
+      `${title || ""}${year ? ` (${year})` : ""}`,
+      meta.resolution,
+      meta.source,
+      meta.hdr,
+      meta.codec,
+      meta.audio,
+    ]
+      .filter(Boolean)
+      .join(" • "),
   };
 }
 
-// ============================================================================
-// Main Search Function
-// ============================================================================
+function getClusterKey(t) {
+  return [
+    t.quality || "unknown",
+    t.source || "unknown",
+    t.codec || "unknown",
+    t.hdr || "SDR",
+  ].join("_");
+}
 
-async function getTorrents(
-  imdbId,
-  title = null,
-  year = null,
-  timeout = CONFIG.jackett.timeout,
-) {
-  try {
-    // Build search queries
-    const searches = [];
+function clusterTorrents(torrents) {
+  const clusters = new Map();
 
-    if (imdbId?.startsWith("tt")) {
-      searches.push(executeSearch(imdbId, "movie"));
+  for (const t of torrents) {
+    const key = getClusterKey(t);
+
+    if (!clusters.has(key)) {
+      clusters.set(key, []);
     }
 
-    if (title && title.length >= CONFIG.search.minTitleLength) {
-      const cleaned = title
-        .replace(CONFIG.search.cleanPatterns, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      const query = year ? `${cleaned} ${year}` : cleaned;
-      searches.push(executeSearch(query, "movie"));
-    }
-
-    if (searches.length === 0) {
-      console.warn("[Provider] No valid search criteria provided");
-      return [];
-    }
-
-    // Execute searches with timeout control
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-    try {
-      const resultsArrays = await Promise.all(
-        searches.map((s) =>
-          s.catch((err) => {
-            console.error(`[Provider] Search branch failed: ${err.message}`);
-            return [];
-          }),
-        ),
-      );
-
-      clearTimeout(timeoutId);
-
-      const rawItems = resultsArrays.flat();
-      console.log(`[Provider] Total raw results: ${rawItems.length}`);
-
-      if (!rawItems.length) return [];
-
-      // Deduplicate
-      const uniqueItems = deduplicateResults(rawItems);
-      console.log(`[Provider] After dedupe: ${uniqueItems.length}`);
-
-      // Transform & filter
-      const found = uniqueItems
-        .map((item) => parseAndFilterTorrent(item, { title, year }))
-        .filter(Boolean);
-
-      console.log(`[Provider] Final results: ${found.length}`);
-
-      // Score and sort
-      return found
-        .map((t) => ({ ...t, score: calculateScore(t) }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, CONFIG.jackett.maxResults);
-    } catch (err) {
-      clearTimeout(timeoutId);
-      throw err;
-    }
-  } catch (error) {
-    console.error(`[Provider] Fatal error: ${error.message}`);
-    if (error instanceof JackettError) {
-      console.error(`[Provider] Cause: ${error.cause?.message}`);
-    }
-    return [];
+    clusters.get(key).push(t);
   }
+
+  return clusters;
 }
 
-// ============================================================================
-// API Wrappers
-// ============================================================================
+function pickBestFromClusters(clusters) {
+  const results = [];
 
-async function getMovieByImdb(
-  imdbId,
-  title = null,
-  year = null,
-  timeout = CONFIG.jackett.timeout,
-) {
-  const torrents = await getTorrents(imdbId, title, year, timeout);
-  return torrents.length > 0
-    ? { imdbId, title: title || "Jackett Result", torrents }
-    : null;
+  for (const group of clusters.values()) {
+    group.sort(
+      (a, b) => b.score - a.score || (b.sizeNum || 0) - (a.sizeNum || 0),
+    );
+
+    const best = group[0];
+
+    results.push({
+      ...best,
+      clusterSize: group.length,
+      alternatives: group.slice(1),
+    });
+  }
+
+  return results;
+}
+// ================= MAIN =================
+async function getTorrents(imdbId, title, year) {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), CONFIG.jackett.timeout);
+
+  const searches = [];
+
+  if (imdbId) searches.push(executeSearch(imdbId, controller.signal));
+
+  if (title) {
+    const query = year ? `${cleanTitle(title)} ${year}` : cleanTitle(title);
+    searches.push(executeSearch(query, controller.signal));
+  }
+
+  const results = (await Promise.all(searches)).flat();
+
+  const unique = new Map();
+  for (const item of results) {
+    const key = item.infoHash || item.guid || item.title;
+    if (!unique.has(key)) unique.set(key, item);
+  }
+
+  const parsed = [];
+
+  for (const item of unique.values()) {
+    const t = parseTorrent(item, title, year);
+    if (t) parsed.push(t);
+  }
+
+  const scored = parsed.map((t) => ({
+    ...t,
+    score: calculateScore(t),
+  }));
+
+  const clusters = clusterTorrents(scored);
+
+  const bestPerCluster = pickBestFromClusters(clusters);
+  const withLabels = bestPerCluster.map((t) => ({
+    ...t,
+    label: [
+      `${title || ""}${year ? ` (${year})` : ""}`,
+      t.quality,
+      t.source,
+      t.hdr,
+      t.codec,
+      t.audio,
+      t.clusterSize > 1 ? `🔥 +${t.clusterSize - 1} more` : null,
+    ]
+      .filter(Boolean)
+      .join(" • "),
+  }));
+
+  return withLabels
+    .sort((a, b) => b.score - a.score)
+    .slice(0, CONFIG.jackett.maxResults);
 }
 
-async function getShowTorrents(imdbId, timeout = 15000) {
-  const torrents = await getTorrents(imdbId, null, null, timeout);
+// ================= MOVIE =================
+async function getMovieByImdb(imdbId, title, year) {
+  const torrents = await getTorrents(imdbId, title, year);
+  return torrents.length ? { imdbId, title, torrents } : null;
+}
+
+// ================= SHOW =================
+async function getShowTorrents(imdbId, title) {
+  const torrents = await getTorrents(imdbId, title, null);
   if (!torrents.length) return {};
 
   const seasons = {};
 
   for (const t of torrents) {
-    const sMatch = t.title.match(/S(\d+)/i);
-    const eMatch = t.title.match(/E(\d+)/i);
-    if (!sMatch || !eMatch) continue;
+    const name = t.title || "";
 
-    const s = String(parseInt(sMatch[1], 10));
-    const e = String(parseInt(eMatch[1], 10));
+    const m = name.match(/S(\d+)E(\d+)/i) || name.match(/(\d+)x(\d+)/i);
 
-    seasons[s] = seasons[s] || {};
-    seasons[s][e] = seasons[s][e] || [];
+    if (!m) continue;
+
+    const s = String(parseInt(m[1]));
+    const e = String(parseInt(m[2]));
+
+    seasons[s] ??= {};
+    seasons[s][e] ??= [];
+
     seasons[s][e].push(t);
   }
 
   return seasons;
 }
 
-async function listMovies() {
-  return [];
-}
-
+// ================= EXPORT =================
 module.exports = {
   getMovieByImdb,
-  getShowTorrents,
-  listMovies,
   getTorrents,
-  // Export internals for testing
-  CONFIG,
-  calculateScore,
-  deduplicateResults,
-  parseAndFilterTorrent,
+  getShowTorrents,
 };

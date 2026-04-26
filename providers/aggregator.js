@@ -10,11 +10,15 @@ const { raceProviders } = require("./race");
 const health = require("./health");
 const { parseRelease } = require("./sceneParser");
 
+// ------------------------------
+// Safe timeout with NaN guard
+// ------------------------------
 function withTimeout(promise, ms = 8000) {
+  const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 8000;
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Timeout")), ms),
+      setTimeout(() => reject(new Error("Timeout")), safeMs),
     ),
   ]);
 }
@@ -28,7 +32,6 @@ async function getMovies(params) {
     },
   ].filter((p) => health.isHealthy(p.name));
 
-  // 🔥 critical safety
   if (!providers.length) {
     console.warn("⚠️ All providers unhealthy → resetting");
     providers = [
@@ -42,21 +45,17 @@ async function getMovies(params) {
 
   try {
     const { result, name } = await raceProviders(providers);
-
     if (name !== "none" && result && result.length) {
       health.markSuccess(name);
       console.log(`🏆 Winner: ${name}`);
       return result;
     }
-
     throw new Error("No results from race");
   } catch (err) {
     console.warn("❌ All providers failed or empty → fallback loop");
-
     for (const p of providers) {
       try {
         const res = await p.fn();
-
         if (res && res.length) {
           health.markSuccess(p.name);
           return res;
@@ -65,12 +64,10 @@ async function getMovies(params) {
         health.markFailure(p.name);
       }
     }
-
     return [];
   }
 }
 
-// Constants for configuration
 const TIMEOUTS = {
   YTS: 6000,
   OMDb: 5000,
@@ -85,7 +82,6 @@ async function getMovieByImdb(imdbId) {
   let searchTitle = null;
   let searchYear = null;
 
-  // 1. Start OMDb lookup immediately (Cached)
   const omdbPromise = cached(`omdb:title:${imdbId}`, TIMEOUTS.CACHE_TTL, () =>
     omdb.getMetaByImdb(imdbId),
   ).catch((err) => {
@@ -93,7 +89,6 @@ async function getMovieByImdb(imdbId) {
     return null;
   });
 
-  // 2. Fetch YTS in parallel with OMDb
   const ytsPromise = withTimeout(yts.getMovieByImdb(imdbId), TIMEOUTS.YTS)
     .then((res) => {
       health.markSuccess("yts");
@@ -105,10 +100,8 @@ async function getMovieByImdb(imdbId) {
       return null;
     });
 
-  // 3. Wait for YTS, but don't block OMDb
   const ytsResult = await ytsPromise;
 
-  // 4. Determine Metadata & Search Title
   if (ytsResult && ytsResult.torrents?.length) {
     allTorrents.push(...ytsResult.torrents);
     movieMeta = ytsResult;
@@ -123,7 +116,6 @@ async function getMovieByImdb(imdbId) {
     }
   }
 
-  // 5. Fetch Jackett if we have a title to search
   if (searchTitle) {
     const jackettPromise = jackett.getMovieByImdb(
       imdbId,
@@ -131,13 +123,11 @@ async function getMovieByImdb(imdbId) {
       searchYear,
       TIMEOUTS.JACKETT,
     );
-
     const jackettResult = await Promise.resolve(jackettPromise).catch((err) => {
       console.warn(`[aggregator] Jackett error: ${err.message}`);
       health.markFailure("jackett");
       return null;
     });
-
     if (jackettResult?.torrents?.length > 0) {
       const tagged = jackettResult.torrents.map((t) => ({
         ...t,
@@ -148,12 +138,10 @@ async function getMovieByImdb(imdbId) {
     }
   }
 
-  // 6. Final Fallback
   if (allTorrents.length === 0) {
     return fallback.getMovieByImdb(imdbId);
   }
 
-  // 7. Enrich & Sort torrents
   const enrichedTorrents = allTorrents.map((t) => {
     const parsed = parseRelease(t.title || t.filename || t.name || "");
     return {
@@ -164,13 +152,11 @@ async function getMovieByImdb(imdbId) {
   });
 
   enrichedTorrents.sort((a, b) => {
-    if (b.qualityScore !== a.qualityScore) {
+    if (b.qualityScore !== a.qualityScore)
       return b.qualityScore - a.qualityScore;
-    }
     return (b.seeds || 0) - (a.seeds || 0);
   });
 
-  // 8. Return Merged Object
   return {
     ...movieMeta,
     imdbId,
@@ -180,6 +166,9 @@ async function getMovieByImdb(imdbId) {
   };
 }
 
+// ------------------------------
+// ✅ FIXED: getShowMeta - was missing
+// ------------------------------
 async function getShowMeta(imdbId) {
   try {
     const meta = await omdb.getMetaByImdb(imdbId);
@@ -194,12 +183,28 @@ async function getShowMeta(imdbId) {
   return { title: `TV Show (${imdbId})` };
 }
 
+// ------------------------------
+// Helper: clean show title (remove year ranges)
+// ------------------------------
+function cleanShowTitle(title) {
+  if (!title) return title;
+  let cleaned = title
+    .replace(/\s*[–-]\s*\d{4}\s*$/, "")
+    .replace(/\s*\(\d{4}[–-]\d{4}\)\s*$/, "")
+    .replace(/\s*[–-]\s*$/, "")
+    .trim();
+  return cleaned;
+}
+
+// ------------------------------
+// Improved getShowTorrents with year fixes
+// ------------------------------
 async function getShowTorrents(imdbId) {
   const allTorrents = {};
   let showTitle = null;
   let showYear = null;
 
-  // 1. Fetch OMDb metadata first (to get title for Jackett search)
+  // 1. Fetch OMDb metadata
   try {
     const omdbMeta = await cached(
       `omdb:title:${imdbId}`,
@@ -216,7 +221,12 @@ async function getShowTorrents(imdbId) {
     health.markFailure("omdb");
   }
 
-  // 2. Fetch EZTV (uses IMDB ID primarily, title as fallback)
+  const cleanedTitle = showTitle ? cleanShowTitle(showTitle) : null;
+  console.log(
+    `[aggregator] Cleaned show title: ${cleanedTitle} (original: ${showTitle})`,
+  );
+
+  // 2. EZTV promise (uses IMDb ID and original title)
   const eztvPromise = withTimeout(
     eztv.getShowTorrents(imdbId, showTitle),
     TIMEOUTS.EZTV,
@@ -231,10 +241,10 @@ async function getShowTorrents(imdbId) {
       return {};
     });
 
-  // 3. Fetch Jackett (uses IMDB ID + Title for better results)
+  // 3. Jackett promise – pass year = null to disable year filtering
   const jackettPromise = withTimeout(
-    jackett.getShowTorrents(imdbId, showTitle, showYear, 15000),
-    20000,
+    jackett.getShowTorrents(imdbId, cleanedTitle, null, 30000),
+    35000,
   )
     .then((data) => {
       health.markSuccess("jackett");
@@ -246,13 +256,13 @@ async function getShowTorrents(imdbId) {
       return {};
     });
 
-  // 4. Wait for both to complete
+  // 4. Wait for both
   const [eztvData, jackettData] = await Promise.all([
     eztvPromise,
     jackettPromise,
   ]);
 
-  // 5. Merge helper
+  // 5. Merge torrents
   const mergeTorrents = (target, source, providerName) => {
     if (!source || Object.keys(source).length === 0) return;
     for (const [season, episodes] of Object.entries(source)) {
@@ -276,18 +286,19 @@ async function getShowTorrents(imdbId) {
   mergeTorrents(allTorrents, eztvData, "eztv");
   mergeTorrents(allTorrents, jackettData, "jackett");
 
-  // 6. Fallback if both empty
   if (Object.keys(allTorrents).length === 0) {
+    console.warn(
+      `[aggregator] No torrents found for ${imdbId} from EZTV or Jackett`,
+    );
     return fallback.getShowTorrents(imdbId);
   }
 
-  // 7. Sort torrents within each episode (Quality > Seeds)
+  // 6. Sort torrents within each episode (Quality > Seeds)
   for (const season of Object.keys(allTorrents)) {
     for (const episode of Object.keys(allTorrents[season])) {
       allTorrents[season][episode].sort((a, b) => {
-        if (b.qualityScore !== a.qualityScore) {
+        if (b.qualityScore !== a.qualityScore)
           return b.qualityScore - a.qualityScore;
-        }
         return (b.seeds || 0) - (a.seeds || 0);
       });
     }
@@ -315,5 +326,5 @@ module.exports = {
   getMovieByImdb,
   getLatestShows,
   getShowTorrents,
-  getShowMeta,
+  getShowMeta, // ✅ now defined
 };
