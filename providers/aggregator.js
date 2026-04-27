@@ -22,10 +22,20 @@ function withTimeout(promise, ms = 8000) {
     ),
   ]);
 }
-
+// ------------------------------
+// Get movies with provider racing and health checks
+// ------------------------------
 async function getMovies(params) {
   let providers = [
     { name: "yts", fn: () => withTimeout(yts.listMovies(params), 8000) },
+    {
+      name: "jackett",
+      fn: () =>
+        withTimeout(
+          jackettSearchMovies(params), // NEW wrapper (see below)
+          15000,
+        ),
+    },
     {
       name: "fallback",
       fn: () => withTimeout(fallback.listMovies(params), 8000),
@@ -76,6 +86,9 @@ const TIMEOUTS = {
   CACHE_TTL: 24 * 60 * 60 * 1000,
 };
 
+// ------------------------------
+// Get movie by IMDb ID with aggregation and enrichment
+// ------------------------------
 async function getMovieByImdb(imdbId) {
   const allTorrents = [];
   let movieMeta = null;

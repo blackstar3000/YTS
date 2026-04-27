@@ -50,6 +50,7 @@ const TRACKERS = [
   "udp://tracker.opentrackr.org:1337/announce",
   "udp://tracker.openbittorrent.com:80",
   "udp://tracker.torrent.eu.org:451/announce",
+  "udp://tr4ck3r.duckdns.org:6969/announce",
 ]
   .map((t) => `&tr=${encodeURIComponent(t)}`)
   .join("");

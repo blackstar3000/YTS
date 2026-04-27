@@ -401,7 +401,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
       return { streams: [], cacheMaxAge: 3600 };
     }
   }
-
   if (type === "series" && season !== null && episode !== null) {
     try {
       const seasons = await cached(
@@ -440,7 +439,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
           const titleLine = t.title || "";
           const shortTitle =
             titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
-
           return {
             name: `Phantom\n${t.quality}`,
             title: `${shortTitle}📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n${t.quality} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${providerName}`,
@@ -457,7 +455,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
       return { streams: [], cacheMaxAge: 3600 };
     }
   }
-
   return { streams: [], cacheMaxAge: 3600 };
 });
 
