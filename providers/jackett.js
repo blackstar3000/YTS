@@ -136,6 +136,11 @@ async function executeSearch(query, signal) {
 
     return Array.isArray(res.data) ? res.data : [];
   } catch (err) {
+    if (err.name === "AbortError" || err.message === "canceled") {
+      console.log(`[Provider] Search canceled (${query})`);
+      return [];
+    }
+
     console.error(`[Provider] Search failed (${query}): ${err.message}`);
     return [];
   }

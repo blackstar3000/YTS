@@ -6,7 +6,12 @@ const jackett = require("./jackett");
 const eztv = require("./eztv");
 const omdb = require("./omdb");
 const { cached } = require("./cache");
-const { raceProviders } = require("./race");
+const {
+  raceProvidersV2,
+  getStats,
+  dynamicTimeout,
+  isProviderHealthy,
+} = require("./race");
 const health = require("./health");
 const { parseRelease } = require("./sceneParser");
 
@@ -27,25 +32,37 @@ function withTimeout(promise, ms = 8000) {
 // ------------------------------
 async function getMovies(params) {
   let providers = [
-    { name: "yts", fn: () => withTimeout(yts.listMovies(params), 8000) },
+    {
+      name: "yts",
+      fn: () => withTimeout(yts.listMovies(params), dynamicTimeout("yts")),
+    },
     {
       name: "jackett",
       fn: () =>
-        withTimeout(
-          jackettSearchMovies(params), // NEW wrapper (see below)
-          15000,
-        ),
+        withTimeout(jackettSearchMovies(params), dynamicTimeout("jackett")),
     },
     {
       name: "fallback",
-      fn: () => withTimeout(fallback.listMovies(params), 8000),
+      fn: () =>
+        withTimeout(fallback.listMovies(params), dynamicTimeout("fallback")),
     },
-  ].filter((p) => health.isHealthy(p.name));
+  ]
+    .filter((p) => health.isHealthy(p.name) && isProviderHealthy(p.name))
+    .sort((a, b) => {
+      // Order by historical avg time (fastest first)
+      const sa = getStats(a.name)?.avgTime || Infinity;
+      const sb = getStats(b.name)?.avgTime || Infinity;
+      return sa - sb;
+    });
 
   if (!providers.length) {
     console.warn("⚠️ All providers unhealthy → resetting");
     providers = [
       { name: "yts", fn: () => withTimeout(yts.listMovies(params), 15000) },
+      {
+        name: "jackett",
+        fn: () => withTimeout(jackettSearchMovies(params), 15000),
+      },
       {
         name: "fallback",
         fn: () => withTimeout(fallback.listMovies(params), 15000),
@@ -54,7 +71,7 @@ async function getMovies(params) {
   }
 
   try {
-    const { result, name } = await raceProviders(providers);
+    const { result, name } = await raceProvidersV2(providers, 1000);
     if (name !== "none" && result && result.length) {
       health.markSuccess(name);
       console.log(`🏆 Winner: ${name}`);
