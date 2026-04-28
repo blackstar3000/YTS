@@ -27,10 +27,100 @@ function withTimeout(promise, ms = 8000) {
     ),
   ]);
 }
+
+// ===============================
+// Hybrid Race + Merge Helpers
+// ===============================
+
+// NEW: Search Jackett by query (since getMovies doesn't have IMDb ID)
+async function fetchJackettSearchResults(params) {
+  const query = (params.query || params.query_term || "").trim();
+  if (!query) return [];
+
+  try {
+    const results = await withTimeout(
+      async function smartJackettSearch(params) {
+        const { imdb_id, query, year, season, episode, type } = params;
+
+        // 🎬 MOVIE SEARCH
+        if (type === "movie") {
+          return jackett.getTorrents(
+            imdb_id || null,
+            query || "",
+            year || null,
+          );
+        }
+
+        // 📺 TV SEARCH
+        if (type === "series") {
+          return jackett.getShowTorrents(imdb_id, season, episode);
+        }
+
+        // fallback
+        return jackett.getTorrents(null, query || "", null);
+      },
+      15000, // Shorter timeout for merge phase
+    );
+    return results || [];
+  } catch (err) {
+    console.warn(`[aggregator] Jackett search failed: ${err.message}`);
+    return [];
+  }
+}
+
+// NEW: Extract hash from magnet URL
+function extractHashFromMagnet(magnet) {
+  if (!magnet) return null;
+  const match = magnet.match(/xt=urn:btih:([a-fA-F0-9]+)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+// NEW: Normalize title for deduplication
+function normalizeTitle(title) {
+  return title
+    ?.toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 50);
+}
+
+// NEW: Deduplicate torrents by hash, magnet, or title
+function deduplicateTorrents(torrents) {
+  const seen = new Map();
+  let counter = 0;
+
+  for (const t of torrents) {
+    // Priority: hash > magnet > title > indexed fallback
+    const key =
+      t.hash ||
+      extractHashFromMagnet(t.magnet) ||
+      normalizeTitle(t.title) ||
+      `unknown_${counter++}`;
+
+    // Keep higher-seeded version
+    if (!seen.has(key) || (t.seeds || 0) > (seen.get(key).seeds || 0)) {
+      seen.set(key, t);
+    }
+  }
+
+  return Array.from(seen.values());
+}
+
+// NEW: Final scoring formula (quality + seeds + provider boost)
+function calculateFinalScore(torrent) {
+  const qualityScore = torrent.qualityScore || torrent.parsed?.score || 0;
+  const seeds = torrent.seeds || 0;
+  const providerBoost = torrent.provider === "jackett" ? 10 : 0;
+
+  // Formula: quality * 1.5 + seeds * 0.3 + providerBoost (favors quality over seed spam)
+  return qualityScore * 1.5 + seeds * 0.3 + providerBoost;
+}
+
 // ------------------------------
 // Get movies with provider racing and health checks
 // ------------------------------
 async function getMovies(params) {
+  const isMovie = params.type === "movie";
+  const isSeries = params.type === "series";
   let providers = [
     {
       name: "yts",
@@ -39,7 +129,10 @@ async function getMovies(params) {
     {
       name: "jackett",
       fn: () =>
-        withTimeout(jackettSearchMovies(params), dynamicTimeout("jackett")),
+        withTimeout(
+          jackett.searchMovies(params.query || params.query_term || "", 20),
+          dynamicTimeout("jackett"),
+        ),
     },
     {
       name: "fallback",
@@ -61,7 +154,11 @@ async function getMovies(params) {
       { name: "yts", fn: () => withTimeout(yts.listMovies(params), 15000) },
       {
         name: "jackett",
-        fn: () => withTimeout(jackettSearchMovies(params), 15000),
+        fn: () =>
+          withTimeout(
+            jackett.searchMovies(params.query || params.query_term || "", 20),
+            15000,
+          ),
       },
       {
         name: "fallback",
@@ -70,14 +167,74 @@ async function getMovies(params) {
     ];
   }
 
+  // Ensure Jackett is always included (even if health check failed)
+  if (!providers.some((p) => p.name === "jackett")) {
+    providers.push({
+      name: "jackett",
+      fn: () =>
+        withTimeout(
+          jackett.searchMovies(params.query || params.query_term || "", 20),
+          12000,
+        ),
+    });
+  }
+
   try {
-    const { result, name } = await raceProvidersV2(providers, 1000);
-    if (name !== "none" && result && result.length) {
-      health.markSuccess(name);
-      console.log(`🏆 Winner: ${name}`);
-      return result;
+    // PHASE 1: Race for fastest result
+    const { result: winnerResult, name: winnerName } = await raceProvidersV2(
+      providers,
+      1000,
+    );
+
+    if (!winnerResult || !winnerResult.length) {
+      throw new Error("No results from race");
     }
-    throw new Error("No results from race");
+
+    console.log(`🏆 Race winner: ${winnerName}`);
+    health.markSuccess(winnerName);
+
+    // PHASE 2: Merge Jackett results (always include Jackett for diversity)
+    let allTorrents = [...winnerResult];
+
+    // Fetch Jackett if it didn't win (ensures Jackett always contributes)
+    if (winnerName !== "jackett") {
+      const jackettResults = await fetchJackettSearchResults(params);
+      if (jackettResults?.length) {
+        const tagged = jackettResults.map((t) => ({
+          ...t,
+          provider: "jackett",
+        }));
+        allTorrents.push(...tagged);
+        console.log(`📦 Merged ${jackettResults.length} Jackett results`);
+      }
+    }
+
+    // Deduplicate by hash/magnet/title
+    const deduped = deduplicateTorrents(allTorrents);
+
+    // Enrich with parsed metadata and qualityScore (if not already present)
+    const enriched = deduped.map((t) => ({
+      ...t,
+      parsed: t.parsed || parseRelease(t.title || t.filename || t.name || ""),
+      qualityScore: t.qualityScore || t.parsed?.score || 0,
+    }));
+
+    // Re-score with combined formula
+    const scored = enriched.map((t) => ({
+      ...t,
+      finalScore: calculateFinalScore(t),
+    }));
+
+    // Sort by finalScore, cap at 20
+    scored.sort((a, b) => b.finalScore - a.finalScore);
+
+    // Logging for visibility
+    console.log(`📊 Final results: ${scored.length}`);
+    console.log(`📊 Providers in final set:`, [
+      ...new Set(scored.map((t) => t.provider)),
+    ]);
+
+    return scored.slice(0, 20);
   } catch (err) {
     console.warn("❌ All providers failed or empty → fallback loop");
     for (const p of providers) {
@@ -273,7 +430,7 @@ async function getShowTorrents(imdbId) {
 
   // 3. Jackett promise – pass year = null to disable year filtering
   const jackettPromise = withTimeout(
-    jackett.getShowTorrents(imdbId, cleanedTitle, null, 30000),
+    jackett.getShowTorrents(imdbId, cleanedTitle),
     35000,
   )
     .then((data) => {
