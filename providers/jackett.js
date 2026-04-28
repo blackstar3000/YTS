@@ -56,6 +56,7 @@ function titleMatches(torrentTitle, targetTitle) {
 function cleanTitle(title) {
   return title
     ?.replace(/[:\-–—]/g, " ")
+    .replace(/'/g, "") // ← collapse apostrophes instead of spacing them
     .replace(/[^a-zA-Z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
