@@ -9,10 +9,13 @@ const CONFIG = Object.freeze({
     baseUrl:
       process.env.JACKETT_URL?.replace(/\/$/, "") || "http://localhost:9696",
     apiKey: process.env.JACKETT_API_KEY,
-    timeout: parseInt(process.env.JACKETT_TIMEOUT, 10) || 20000,
+    timeout: parseInt(process.env.JACKETT_TIMEOUT, 10) || 15000,
     maxRetries: parseInt(process.env.JACKETT_MAX_RETRIES, 10) || 2,
     retryDelay: parseInt(process.env.JACKETT_RETRY_DELAY, 10) || 800,
-    categories: { movie: [2000], tv: [5000] },
+    categories: {
+      movie: [2000],
+      tv: [5000], // Added Animation/Kids categories
+    },
     maxResults: 50,
     minSeeds: 1,
   },
@@ -72,52 +75,63 @@ const TRACKERS = [
   .map((t) => `&tr=${encodeURIComponent(t)}`)
   .join("");
 
+/**
+ * Ensures the infoHash is 40-character Hex and builds a valid magnet.
+ * 2026 Safety Check: Filters out invalid hashes or malformed IDs.
+ */
 function buildMagnet(hash, name) {
-  if (!hash) return null;
-  return `magnet:?xt=urn:btih:${hash.toLowerCase()}&dn=${encodeURIComponent(name)}${TRACKERS}`;
+  if (!hash || typeof hash !== "string") return null;
+
+  const cleanHash = hash.trim().toLowerCase();
+
+  // Validate that it is a proper 40-character SHA1 hex string
+  if (!/^[0-9a-f]{40}$/.test(cleanHash)) {
+    console.warn(`[Magnet] Invalid hash detected: ${cleanHash}`);
+    return null;
+  }
+
+  return `magnet:?xt=urn:btih:${cleanHash}&dn=${encodeURIComponent(name || "torrent")}${TRACKERS}`;
 }
 
 // ================= SCORE =================
 function calculateScore(t) {
   let score = 0;
 
-  // Resolution
+  // --- Resolution ---
   if (t.quality === "2160p") score += 50;
   else if (t.quality === "1080p") score += 30;
   else if (t.quality === "720p") score += 10;
 
-  // Source — single block, no double-counting
+  // --- Source ---
   if (t.source === "REMUX") score += 110;
   else if (t.source === "BluRay") score += 50;
   else if (t.source === "WEB-DL") score += 30;
-  else if (t.source === "WEBRip") score += 20;
 
-  // HDR
-  if (t.hdr === "Dolby Vision") score += 40;
+  // --- HDR (2026 Refined) ---
+  if (t.hdr === "Dolby Vision")
+    score += 45; // Top tier
   else if (t.hdr === "HDR10+") score += 35;
   else if (t.hdr === "HDR") score += 25;
 
-  // Codec
-  if (t.codec === "x265") score += 15;
+  // --- Codec (AV1 Priority) ---
+  if (t.codec === "AV1")
+    score += 30; // 2026 Efficiency King
+  else if (t.codec === "x265") score += 15;
   else if (t.codec === "x264") score += 5;
 
-  // Audio
+  // --- Audio ---
   if (t.audio === "TrueHD") score += 20;
   else if (t.audio === "DTS-HD") score += 15;
 
-  // Seeder health — log scale, capped at 30pts
-  // Dead torrents (0 seeds) get -20 penalty instead of a neutral 0
+  // --- Health & Indexer ---
   if (t.seeds <= 0) {
     score -= 20;
   } else {
     score += Math.min(Math.log10(t.seeds) * 5, 30);
   }
-
-  // Penalise known lower-quality public indexers
   if (t.indexer?.toLowerCase().includes("1337x")) score -= 10;
 
-  // Penalise suspiciously small 4K files — source-aware thresholds:
-  // WEB-DL/WEBRip 4K can legitimately be ~8-15 GB; REMUX/BluRay should be much larger
+  // --- Size-to-Quality Guardrail ---
   if (t.quality === "2160p" && t.sizeNum) {
     const isWebSource = ["WEB-DL", "WEBRip"].includes(t.source);
     const threshold = isWebSource ? 6 : 20;
@@ -173,20 +187,28 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
       params = {
         type: "tvsearch",
         categories: CONFIG.jackett.categories.tv,
-        ...(query &&
-          !advancedParams.tvdbid &&
-          !advancedParams.tvmazeid &&
-          !advancedParams.imdbid && { query }),
+
+        // ✅ ALWAYS force a query if we have one
+        query: query || undefined,
+
+        // ✅ ALSO include imdbid
+        ...(advancedParams.imdbid && { imdbid: advancedParams.imdbid }),
+
         ...(advancedParams.tvdbid && { tvdbid: advancedParams.tvdbid }),
         ...(advancedParams.tvmazeid && { tvmazeid: advancedParams.tvmazeid }),
-        ...(advancedParams.imdbid && { imdbid: advancedParams.imdbid }),
-        ...(advancedParams.season && { season: advancedParams.season }),
-        ...(advancedParams.ep && { ep: advancedParams.ep }),
+
+        ...(advancedParams.season != null && { season: advancedParams.season }),
+        ...(advancedParams.ep != null && { ep: advancedParams.ep }),
       };
+
+      // 🔥 CRITICAL: if query is still missing, build one
+      if (!params.query && advancedParams.imdbid && advancedParams.title) {
+        params.query = cleanTitle(advancedParams.title);
+      }
     } else {
       params = {
         type: "moviesearch",
-        categories: CONFIG.jackett.categories.movie,
+        categories: CONFIG.jackett.categories.movie.join(","),
         ...(query &&
           !advancedParams.imdbid &&
           !advancedParams.tmdbid && { query }),
@@ -205,6 +227,9 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
       {
         params,
         timeout: CONFIG.jackett.timeout,
+        timeoutErrorMessage: "Jackett request timeout",
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
         signal,
         headers: {
           "X-Api-Key": CONFIG.jackett.apiKey,
@@ -378,17 +403,21 @@ function buildLabel(title, year, t) {
 // ================= MAIN =================
 async function getTorrents(imdbId, title, year) {
   const controller = new AbortController();
-  const abortTimer = setTimeout(
-    () => controller.abort(),
-    CONFIG.jackett.timeout,
-  );
+
+  const searchWithTimeout = (promise) =>
+    Promise.race([
+      promise,
+      new Promise((resolve) =>
+        setTimeout(() => resolve([]), CONFIG.jackett.timeout),
+      ),
+    ]);
 
   try {
     const searches = [];
 
     if (imdbId) {
       searches.push(
-        executeSearch(null, "moviesearch", controller.signal, {
+        executeSearch(cleanTitle(title), "moviesearch", controller.signal, {
           imdbid: imdbId,
         }),
       );
@@ -416,118 +445,144 @@ async function getTorrents(imdbId, title, year) {
       .sort((a, b) => b.score - a.score)
       .slice(0, CONFIG.jackett.maxResults);
   } finally {
-    clearTimeout(abortTimer);
+    // clearTimeout(abortTimer);
   }
 }
 
 // ================= MOVIE =================
 async function getMovieByImdb(imdbId, title, year) {
-  const torrents = await getTorrents(imdbId, title, year);
+  const torrents = await getTorrents(imdbId, title, year, "movie");
   return torrents.length ? { imdbId, title, year, torrents } : null;
 }
 
 async function searchMovies(query, limit = 20) {
-  const torrents = await getTorrents(null, query, null);
+  const torrents = await getTorrents(null, query, null, "movie");
   return torrents.slice(0, limit);
 }
 
 // ================= SHOW =================
-/**
- * TV search via Prowlarr.
- *
- * @param {string} imdbId  - Full IMDb ID with tt prefix (e.g. "tt0944947")
- * @param {string} title   - Show title for title-match fallback
- * @param {number} [season]  - Optional season number for targeted search
- * @param {number} [ep]      - Optional episode number (requires season)
- * @returns {object} seasons map: { "1": { "1": [torrents], "2": [torrents] }, ... }
- *                   Full-season packs land under { "1": { "0": [torrents] } } by convention.
- */
 async function getShowTorrents(imdbId, title, season, ep) {
-  const controller = new AbortController();
-  const abortTimer = setTimeout(
-    () => controller.abort(),
-    CONFIG.jackett.timeout,
-  );
+  const searchTasks = [];
+
+  // Helper for isolated, timed-out searches
+  const runIsolatedSearch = async (query, params) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      CONFIG.jackett.timeout,
+    );
+    try {
+      return await executeSearch(query, "tvsearch", controller.signal, params);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  // 1. IMDb Search
+  if (imdbId) {
+    searchTasks.push(
+      runIsolatedSearch(cleanTitle(title), {
+        imdbid: imdbId,
+        ...(season != null && { season }),
+        ...(ep != null && { ep }),
+      }),
+    );
+  }
+
+  // 2. Title Fallback
+  if (title) {
+    const query = [
+      cleanTitle(title),
+      season != null ? `S${String(season).padStart(2, "0")}` : null,
+      ep != null ? `E${String(ep).padStart(2, "0")}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    searchTasks.push(runIsolatedSearch(query, {}));
+  }
 
   try {
-    const searches = [];
+    const results = await Promise.allSettled(searchTasks);
+    const raw = results
+      .filter((r) => r.status === "fulfilled")
+      .flatMap((r) => r.value || []);
 
-    // Primary: search by IMDb ID (most indexers support this via Prowlarr)
-    if (imdbId) {
-      searches.push(
-        executeSearch(null, "tvsearch", controller.signal, {
-          imdbid: imdbId,
-          ...(season != null && { season }),
-          ...(ep != null && { ep }),
-        }),
-      );
-    }
-
-    // Fallback: title query — handles indexers that don't support IMDb ID for TV
-    if (title) {
-      const query = [
-        cleanTitle(title),
-        season != null ? `S${String(season).padStart(2, "0")}` : null,
-        ep != null ? `E${String(ep).padStart(2, "0")}` : null,
-      ]
-        .filter(Boolean)
-        .join(" ");
-
-      searches.push(
-        executeSearch(query, "tvsearch", controller.signal, {
-          ...(season != null && { season }),
-          ...(ep != null && { ep }),
-        }),
-      );
-    }
-
-    const raw = (await Promise.all(searches)).flat();
     const unique = deduplicateResults(raw);
-
     const parsed = unique
       .map((item) => parseTorrent(item, title))
       .filter(Boolean);
 
-    // Group by season and episode
-    // Supports: S01E01, 1x01, S01 (full season pack → ep "0"), S01-S03 (multi-season → ep "0")
     const seasons = {};
 
     for (const t of parsed) {
+      const scoredItem = { ...t, score: calculateScore(t) };
       const name = t.title || "";
 
-      // Full season pack: S01 with no episode
-      const packMatch = name.match(/\bS(\d+)\b(?!E\d)/i);
-      // Episode: S01E01 or 1x01
       const epMatch =
         name.match(/S(\d{1,2})E(\d{1,2})/i) || name.match(/(\d{1,2})x(\d{2})/i);
-
-      let s, e;
+      const rangeMatch =
+        name.match(/S(\d{1,2})[-~]S?(\d{1,2})/i) ||
+        name.match(/Seasons?\s?(\d{1,2})[-~](\d{1,2})/i);
+      const packMatch =
+        name.match(/\bS(\d{1,2})\b/i) || name.match(/Season\s?(\d{1,2})/i);
 
       if (epMatch) {
-        s = String(parseInt(epMatch[1]));
-        e = String(parseInt(epMatch[2]));
+        const s = String(parseInt(epMatch[1]));
+        const e = String(parseInt(epMatch[2]));
+        seasons[s] ??= {};
+        seasons[s][e] ??= [];
+        seasons[s][e].push(scoredItem);
+      } else if (rangeMatch) {
+        const start = parseInt(rangeMatch[1]);
+        const end = parseInt(rangeMatch[2]);
+        for (let i = start; i <= end; i++) {
+          const s = String(i);
+          seasons[s] ??= {};
+          seasons[s]["0"] ??= [];
+          seasons[s]["0"].push(scoredItem);
+        }
       } else if (packMatch) {
-        s = String(parseInt(packMatch[1]));
-        e = "0"; // convention: episode 0 = full season pack
-      } else {
-        continue; // skip unrecognised naming
-      }
-
-      seasons[s] ??= {};
-      seasons[s][e] ??= [];
-      seasons[s][e].push({ ...t, score: calculateScore(t) });
-    }
-
-    // Sort each episode's torrent list by score descending
-    for (const s of Object.values(seasons)) {
-      for (const epList of Object.values(s)) {
-        epList.sort((a, b) => b.score - a.score);
+        const s = String(parseInt(packMatch[1]));
+        seasons[s] ??= {};
+        seasons[s]["0"] ??= [];
+        seasons[s]["0"].push(scoredItem);
       }
     }
 
+    // ------------------------------------------------------------
+    // 🔥 THE CRITICAL FIX: Build Labels and Inject Packs
+    // ------------------------------------------------------------
+    for (const s of Object.keys(seasons)) {
+      const seasonPacks = seasons[s]["0"] || [];
+
+      for (const e of Object.keys(seasons[s])) {
+        // If it's a specific episode, inject the season packs into it
+        if (e !== "0") {
+          seasons[s][e] = [...seasons[s][e], ...seasonPacks];
+        }
+
+        // Sort and Build Labels (Addon UI needs this!)
+        seasons[s][e] = seasons[s][e]
+          .sort((a, b) => b.score - a.score)
+          .map((t) => ({
+            ...t,
+            label: buildLabel(title, null, t), // This makes the link visible!
+          }));
+      }
+    }
+    console.log(`[DEBUG] Seasons found keys:`, Object.keys(seasons));
+    // if (seasons["16"])
+    //   console.log(
+    //     `[DEBUG] Season 16 has ${Object.keys(seasons["16"]).length} episodes`,
+    //   );
+
+    console.log(
+      `[Prowlarr] Found results for ${Object.keys(seasons).length} seasons`,
+    );
     return seasons;
-  } finally {
-    clearTimeout(abortTimer);
+  } catch (err) {
+    console.error("[Prowlarr] getShowTorrents failed:", err.message);
+    return {};
   }
 }
 

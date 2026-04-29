@@ -1,29 +1,28 @@
 "use strict";
 
 /**
- * Scene Release Parser
- * Extracts structured data from torrent titles with robust regex patterns.
+ * Scene Release Parser - 2026 Elite Edition
+ * Optimized for high-fidelity technical metadata extraction.
  */
 
-// Pre-compiled regex patterns for performance
 const PATTERNS = {
   resolution: /\b(2160p|1080p|720p|480p|4k|uhd)\b/i,
   source: {
     remux: /\bremux\b/i,
     bluray: /\b(bluray|bdrip|bd-rip|blu-ray)\b/i,
-    webdl: /\b(web[-_. ]?dl|webdl)\b/i,
+    webdl: /\b(web[-_. ]?dl|webdl|amazonhd|amzn|nf|dsnp|hmax)\b/i, // Added common service tags
     webrip: /\bweb[-_. ]?rip\b/i,
     hdrip: /\bhd[-_. ]?rip\b/i,
     dvd: /\b(dvdrip|dvd-rip|dvdr)\b/i,
   },
   codec: {
-    hevc: /\b(x265|hevc|h265)\b/i,
+    hevc: /\b(x265|hevc|h265|10bit)\b/i,
     av1: /\bav1\b/i,
     h264: /\b(x264|h264|avc)\b/i,
     xvid: /\bxvid\b/i,
   },
   hdr: {
-    dv: /\b(dolby[-_. ]?vision|dv)\b/i,
+    dv: /\b(dolby[-_. ]?vision|dv|dovi)\b/i,
     hdr10p: /\bhdr10\+?\b/i,
     hdr: /\bhdr\b/i,
   },
@@ -32,26 +31,23 @@ const PATTERNS = {
     truehd: /\btrue[-_. ]?hd\b/i,
     dtshd: /\bdts[-_. ]?hd\b/i,
     dts: /\bdts\b/i,
-    ddplus: /\b(dd\+|dolby[-_. ]?digital[-_. ]?plus)\b/i,
+    ddplus: /\b(dd\+|eac3|dolby[-_. ]?digital[-_. ]?plus)\b/i,
     ac3: /\b(ac3|dolby[-_. ]?digital|dd\d\.?\d)\b/i,
     aac: /\baac\b/i,
   },
   extension: /\.(mkv|mp4|avi|mov|wmv|flv|webm|torrent)$/i,
-  checksum: /\b([a-f0-9]{8,})\b$/i, // Removes trailing hash strings
+  checksum: /\b([a-f0-9]{8,})\b$/i,
 };
 
 function parseRelease(title = "") {
   if (!title) return null;
 
-  // Clean title for group extraction (remove extension and trailing hashes)
   const cleanTitle = title
     .replace(PATTERNS.extension, "")
     .replace(PATTERNS.checksum, "")
     .trim();
 
-  // ---------------------------
-  // 🎬 Resolution
-  // ---------------------------
+  // --- Resolution ---
   const resMatch = title.match(PATTERNS.resolution);
   let resolution = null;
   if (resMatch) {
@@ -59,9 +55,7 @@ function parseRelease(title = "") {
     resolution = res === "4k" || res === "uhd" ? "2160p" : res;
   }
 
-  // ---------------------------
-  // 📦 Source (Priority Order)
-  // ---------------------------
+  // --- Source ---
   let source = null;
   if (PATTERNS.source.remux.test(title)) source = "REMUX";
   else if (PATTERNS.source.bluray.test(title)) source = "BluRay";
@@ -70,26 +64,20 @@ function parseRelease(title = "") {
   else if (PATTERNS.source.hdrip.test(title)) source = "HDRip";
   else if (PATTERNS.source.dvd.test(title)) source = "DVDRip";
 
-  // ---------------------------
-  // 🧠 Codec
-  // ---------------------------
+  // --- Codec ---
   let codec = null;
-  if (PATTERNS.codec.hevc.test(title)) codec = "x265";
-  else if (PATTERNS.codec.av1.test(title)) codec = "AV1";
+  if (PATTERNS.codec.av1.test(title)) codec = "AV1";
+  else if (PATTERNS.codec.hevc.test(title)) codec = "x265";
   else if (PATTERNS.codec.h264.test(title)) codec = "x264";
   else if (PATTERNS.codec.xvid.test(title)) codec = "XviD";
 
-  // ---------------------------
-  // 🌈 HDR / Dolby Vision
-  // ---------------------------
+  // --- HDR ---
   let hdr = null;
   if (PATTERNS.hdr.dv.test(title)) hdr = "Dolby Vision";
   else if (PATTERNS.hdr.hdr10p.test(title)) hdr = "HDR10+";
   else if (PATTERNS.hdr.hdr.test(title)) hdr = "HDR";
 
-  // ---------------------------
-  // 🔊 Audio
-  // ---------------------------
+  // --- Audio ---
   let audio = null;
   if (PATTERNS.audio.atmos.test(title)) audio = "Atmos";
   else if (PATTERNS.audio.truehd.test(title)) audio = "TrueHD";
@@ -99,19 +87,9 @@ function parseRelease(title = "") {
   else if (PATTERNS.audio.ac3.test(title)) audio = "AC3";
   else if (PATTERNS.audio.aac.test(title)) audio = "AAC";
 
-  // ---------------------------
-  // 👥 Release Group
-  // ---------------------------
-  // Look for -GROUP or [GROUP] at the end of the cleaned title
-  const groupMatch = cleanTitle.match(/[-[\]()]([A-Za-z0-9]+)[-\]()]?$/);
-  const group = groupMatch ? groupMatch[1] : null;
-
-  // ---------------------------
-  // 🎯 Flags
-  // ---------------------------
-  const is3D = /\b3d\b/i.test(title);
-  const isHDR = !!hdr;
-  const isRemux = source === "REMUX";
+  // --- Group ---
+  const groupMatch = cleanTitle.match(/[-[\]() ]([A-Za-z0-9]+)$/);
+  const group = groupMatch ? groupMatch[1] : "Unknown";
 
   return {
     resolution,
@@ -120,39 +98,37 @@ function parseRelease(title = "") {
     hdr,
     audio,
     group,
-    is3D,
-    isHDR,
-    isRemux,
-    // ✅ Added for sorting
-    score: calculateQualityScore({ resolution, source, isRemux, isHDR, codec }),
+    isHDR: !!hdr,
+    isRemux: source === "REMUX",
+    score: calculateQualityScore({ resolution, source, hdr, codec, audio }),
   };
 }
 
-/**
- * Calculate a numerical score for sorting torrents.
- * Higher score = Better quality preference.
- */
-function calculateQualityScore({ resolution, source, isRemux, isHDR, codec }) {
+function calculateQualityScore({ resolution, source, hdr, codec, audio }) {
   let score = 0;
 
-  // Resolution Base
-  if (resolution === "2160p") score += 40;
+  // 1. Resolution (Base)
+  if (resolution === "2160p") score += 50;
   else if (resolution === "1080p") score += 30;
-  else if (resolution === "720p") score += 20;
-  else if (resolution === "480p") score += 10;
+  else if (resolution === "720p") score += 10;
 
-  // Source Priority
-  if (isRemux) score += 50;
+  // 2. Source (Reliability)
+  if (source === "REMUX") score += 60;
   else if (source === "BluRay") score += 40;
-  else if (source === "WEB-DL") score += 30;
-  else if (source === "WEBRip") score += 25;
-  else if (source === "HDRip") score += 15;
+  else if (source === "WEB-DL") score += 25;
 
-  // HDR Bonus
-  if (isHDR) score += 10;
+  // 3. HDR (Visual Fidelity)
+  if (hdr === "Dolby Vision") score += 20;
+  else if (hdr === "HDR10+") score += 15;
+  else if (hdr === "HDR") score += 10;
 
-  // Codec Bonus (Efficiency)
-  if (codec === "x265" || codec === "AV1") score += 5;
+  // 4. Codec (Efficiency King in 2026)
+  if (codec === "AV1") score += 25;
+  else if (codec === "x265") score += 10;
+
+  // 5. Audio (Immersive)
+  if (audio === "Atmos" || audio === "TrueHD") score += 15;
+  else if (audio === "DTS-HD") score += 10;
 
   return score;
 }

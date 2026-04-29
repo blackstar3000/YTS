@@ -1,54 +1,49 @@
 "use strict";
 
 /**
- * Fallback provider serves as a safety net when primary providers are down.
- * It returns safe, empty structures to prevent the aggregator from crashing.
+ * Fallback Provider - 2026 Resiliency Standard
+ * Prevents aggregator crashes by returning valid but empty data structures.
  */
 
 async function listMovies(params = {}) {
-  console.log("🟡 Fallback provider active: listMovies");
+  console.log("🟡 Fallback: Returning empty movie list");
   return [];
 }
 
 async function getMovieByImdb(imdbId) {
-  console.log("🟡 Fallback provider active: getMovieByImdb");
+  console.log(`🟡 Fallback: Metadata placeholder for ${imdbId}`);
   return {
     imdbId,
-    title: "Unavailable",
-    year: null,
-    rating: 0,
-    runtime: 0,
+    title: "Content Unavailable",
+    year: "N/A",
+    rating: null,
+    description:
+      "The metadata providers are currently unreachable. Please try again later.",
     genres: [],
-    summary: "Content temporarily unavailable from all sources.",
-    language: "en",
-    mpaRating: "N/A",
-    ytTrailer: null,
-    poster: "",
-    background: "",
-    torrents: [],
+    poster: null,
+    torrents: [], // Crucial: Stremio won't see any links but won't crash
     provider: "fallback",
   };
 }
 
 async function getLatestShows(page = 1) {
-  console.log("🟡 Fallback provider active: getLatestShows");
+  console.log("🟡 Fallback: Returning empty latest shows");
   return [];
 }
 
 async function getShowTorrents(imdbId) {
-  console.log("🟡 Fallback provider active: getShowTorrents");
-  return {};
+  console.log(`🟡 Fallback: Returning empty stream object for ${imdbId}`);
+  return {}; // Returns empty season map: {}
 }
 
-// ✅ ADDED: Missing export to match aggregator
 async function getShowMeta(imdbId) {
-  console.log("🟡 Fallback provider active: getShowMeta");
+  console.log(`🟡 Fallback: Meta placeholder for ${imdbId}`);
   return {
     imdbId,
-    title: `TV Show (${imdbId})`,
+    title: "Show Unavailable",
     year: null,
-    rating: 0,
     genres: [],
+    description: "Metadata offline.",
     provider: "fallback",
   };
 }
@@ -58,5 +53,5 @@ module.exports = {
   getMovieByImdb,
   getLatestShows,
   getShowTorrents,
-  getShowMeta, // ✅ Exported
+  getShowMeta,
 };

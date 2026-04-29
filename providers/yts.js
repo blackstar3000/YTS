@@ -2,95 +2,99 @@
 
 const axios = require("axios");
 
-// Configuration
-const TIMEOUT_MS = 7000; // Slightly less than aggregator's 8000ms wrapper
+// ================= CONFIG =================
+const TIMEOUT_MS = 6500; // Slightly faster than aggregator's 8000ms
 const LIMIT_PER_PAGE = 20;
 
-// YTS mirrors (most stable first)
+// 2026 Optimized Mirror List
 const YTS_BASES = [
-  "https://movies-api.accel.li/api/v2/",
   "https://yts.mx/api/v2/",
+  "https://movies-api.accel.li/api/v2/",
   "https://yts.unblockit.cat/api/v2/",
 ];
 
-// Maintained tracker list (removed known dead trackers)
+// 2026 High-Uptime Tracker List
 const TRACKERS = [
-  "udp://open.demonii.com:1337/announce",
-  "udp://tracker.openbittorrent.com:80",
   "udp://tracker.opentrackr.org:1337/announce",
-  "udp://torrent.gresille.org:80/announce",
-  "udp://p4p.arenabg.ch:1337",
-  "udp://tracker.leechers-paradise.org:6969",
-  "udp://exodus.desync.com:6969",
-  "udp://tracker.internetwarriors.net:1337/announce",
+  "udp://tracker.openbittorrent.com:80",
   "udp://tracker.torrent.eu.org:451/announce",
+  "udp://tr4ck3r.duckdns.org:6969/announce",
+  "udp://exodus.desync.com:6969",
+  "udp://tracker.leechers-paradise.org:6969",
   "udp://tracker.dler.org:6969/announce",
-  "udp://tracker.port443.xyz:6969/announce",
 ]
   .map((t) => `&tr=${encodeURIComponent(t)}`)
   .join("");
 
-// Axios instance for reuse
 const apiClient = axios.create({
   headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) 2026-Browser/1.0",
     Accept: "application/json",
   },
   timeout: TIMEOUT_MS,
 });
 
+// ================= UTIL =================
 async function ytsGet(endpoint, params = {}) {
   let lastErr;
-
   for (const base of YTS_BASES) {
     try {
       const res = await apiClient.get(`${base}/${endpoint}`, { params });
-
-      if (res.data && res.data.status === "ok") {
-        return res.data.data;
-      }
+      if (res.data?.status === "ok") return res.data.data;
     } catch (err) {
       lastErr = err;
-      // Debug logging only (disable in production or use logging library)
-      // console.warn(`[yts] ${base} failed: ${err.code || err.message}`);
     }
   }
-
   throw lastErr || new Error("All YTS mirrors failed");
 }
 
 function buildMagnet(hash, title) {
-  if (!hash) {
-    console.error(`[yts] ❌ buildMagnet: missing hash for "${title}"`);
-    return null;
-  }
-  return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(title)}${TRACKERS}`;
+  if (!hash) return null;
+  return `magnet:?xt=urn:btih:${hash.toLowerCase()}&dn=${encodeURIComponent(title)}${TRACKERS}`;
+}
+
+/**
+ * 2026 Internal Scoring for YTS.
+ * YTS encodes are standard (low bitrate), so they get a reliable base score
+ * but won't accidentally outrank a 40GB REMUX from Jackett.
+ */
+function calculateYtsScore(quality, size) {
+  let score = 0;
+  if (quality === "2160p") score += 50;
+  else if (quality === "1080p") score += 30;
+  else if (quality === "720p") score += 10;
+
+  // YTS 4K is almost always x265/HEVC
+  if (quality === "2160p") score += 15;
+
+  // Size-based penalty: If a 1080p file is < 1GB, it's very low quality
+  const sizeGB = parseFloat(size) || 0;
+  if (quality === "1080p" && sizeGB < 1.2) score -= 10;
+
+  return score;
 }
 
 function formatMovie(m) {
-  if (!m) {
-    console.error("[yts] ❌ formatMovie: received null/undefined movie");
-    return null;
-  }
+  if (!m) return null;
 
   const torrents = (m.torrents || [])
     .map((t) => {
-      if (!t.hash) {
-        console.warn(`[yts] ⚠️ Missing hash for ${m.title} ${t.quality}`);
-        return null;
-      }
+      if (!t.hash) return null;
+
+      const quality = t.quality || "720p";
+      const score = calculateYtsScore(quality, t.size);
 
       return {
-        quality: t.quality,
+        quality,
         type: t.type || "web",
         size: t.size || "Unknown",
         seeds: t.seeds || 0,
         peers: t.peers || 0,
         hash: t.hash,
         magnet: buildMagnet(t.hash, m.title_long || m.title),
-        title: `${m.title_english || m.title} (${m.year}) ${t.quality}`,
-        provider: "yts", // ✅ Tag source for aggregator
+        title: `${m.title_english || m.title} (${m.year}) [YTS] ${quality}`,
+        provider: "yts",
+        score: score, // Pre-calculated for aggregator sorting
       };
     })
     .filter(Boolean);
@@ -103,17 +107,13 @@ function formatMovie(m) {
     rating: m.rating,
     runtime: m.runtime,
     genres: m.genres || [],
-    summary: m.synopsis || m.description_full || "",
-    language: m.language,
-    mpaRating: m.mpa_rating,
-    ytTrailer: m.yt_trailer_code,
     poster: m.large_cover_image || m.medium_cover_image || "",
-    background: m.background_image_original || m.background_image || "",
     torrents,
-    provider: "yts", // ✅ Tag source for aggregator
+    provider: "yts",
   };
 }
 
+// ================= EXPORTS =================
 async function listMovies({
   query,
   genre,
@@ -121,7 +121,6 @@ async function listMovies({
   limit = LIMIT_PER_PAGE,
   sortBy = "date_added",
   minRating = 0,
-  quality,
 } = {}) {
   const params = {
     limit,
@@ -130,21 +129,13 @@ async function listMovies({
     order_by: "desc",
     minimum_rating: minRating,
   };
-
   if (query) params.query_term = query;
   if (genre) params.genre = genre;
-  if (quality) params.quality = quality;
 
   try {
     const data = await ytsGet("list_movies.json", params);
-
-    if (!data.movies || data.movies.length === 0) {
-      return [];
-    }
-
-    return data.movies.map(formatMovie).filter(Boolean);
+    return (data.movies || []).map(formatMovie).filter(Boolean);
   } catch (err) {
-    console.error(`[yts] listMovies error: ${err.message}`);
     return [];
   }
 }
@@ -155,14 +146,8 @@ async function getMovieByImdb(imdbId) {
       query_term: imdbId,
       limit: 1,
     });
-
-    if (!data.movies || data.movies.length === 0) {
-      return null;
-    }
-
-    return formatMovie(data.movies[0]);
+    return data.movies?.[0] ? formatMovie(data.movies[0]) : null;
   } catch (err) {
-    console.error(`[yts] getMovieByImdb(${imdbId}) error: ${err.message}`);
     return null;
   }
 }
