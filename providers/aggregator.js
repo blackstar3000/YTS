@@ -1,8 +1,10 @@
 "use strict";
-
+// Aggregator Module
+// Combines results from multiple providers with intelligent deduplication and scoring
+// 2026 Refactored for Robustness, Clarity, and Performance
 const yts = require("./yts");
 const fallback = require("./fallback");
-const jackett = require("./jackett");
+const prowlarr = require("./prowlarr");
 const eztv = require("./eztv");
 const omdb = require("./omdb");
 const { cached } = require("./cache");
@@ -16,7 +18,7 @@ const health = require("./health");
 const { parseRelease } = require("./sceneParser");
 
 // ------------------------------
-// Safe timeout with NaN guard
+// Safe timeout with NaN guard and default value
 // ------------------------------
 function withTimeout(promise, ms = 8000) {
   const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 8000;
@@ -32,15 +34,15 @@ function withTimeout(promise, ms = 8000) {
 // Hybrid Race + Merge Helpers
 // ===============================
 
-async function fetchJackettSearchResults(params) {
+async function fetchprowlarrSearchResults(params) {
   const query = (params.query || params.query_term || "").trim();
   if (!query && !params.imdb_id) return [];
 
   try {
-    const results = await withTimeout(jackett.searchMovies(query, 20), 15000);
+    const results = await withTimeout(prowlarr.searchMovies(query, 20), 15000);
     return results || [];
   } catch (err) {
-    console.warn(`[aggregator] Jackett search failed: ${err.message}`);
+    console.warn(`[aggregator] prowlarr search failed: ${err.message}`);
     return [];
   }
 }
@@ -78,12 +80,12 @@ function deduplicateTorrents(torrents) {
 function calculateFinalScore(torrent) {
   const qualityScore = torrent.qualityScore || torrent.parsed?.score || 0;
   const seeds = torrent.seeds || 0;
-  const providerBoost = torrent.provider === "jackett" ? 10 : 0;
+  const providerBoost = torrent.provider === "prowlarr" ? 10 : 0;
   return qualityScore * 1.5 + seeds * 0.3 + providerBoost;
 }
 
 // ------------------------------
-// Get movies
+// Get movies and shows with intelligent provider selection, deduplication, and scoring
 // ------------------------------
 async function getMovies(params) {
   let providers = [
@@ -92,11 +94,11 @@ async function getMovies(params) {
       fn: () => withTimeout(yts.listMovies(params), dynamicTimeout("yts")),
     },
     {
-      name: "jackett",
+      name: "prowlarr",
       fn: () =>
         withTimeout(
-          jackett.searchMovies(params.query || params.query_term || "", 20),
-          dynamicTimeout("jackett"),
+          prowlarr.searchMovies(params.query || params.query_term || "", 20),
+          dynamicTimeout("prowlarr"),
         ),
     },
     {
@@ -113,10 +115,10 @@ async function getMovies(params) {
     );
     let allTorrents = [...(winnerResult || [])];
 
-    if (winnerName !== "jackett") {
-      const jackettResults = await fetchJackettSearchResults(params);
+    if (winnerName !== "prowlarr") {
+      const prowlarrResults = await fetchprowlarrSearchResults(params);
       allTorrents.push(
-        ...jackettResults.map((t) => ({ ...t, provider: "jackett" })),
+        ...prowlarrResults.map((t) => ({ ...t, provider: "prowlarr" })),
       );
     }
 
@@ -145,7 +147,7 @@ async function getMovies(params) {
 const TIMEOUTS = {
   YTS: 6000,
   OMDb: 5000,
-  JACKETT: 30000,
+  PROWLARR: 30000,
   EZTV: 6000,
   CACHE_TTL: 24 * 60 * 60 * 1000,
 };
@@ -172,12 +174,12 @@ async function getMovieByImdb(imdbId) {
   const year = movieMeta?.year || omdbMeta?.year;
 
   if (title) {
-    const jackettResult = await jackett
+    const prowlarrResult = await prowlarr
       .getMovieByImdb(imdbId, title, year)
       .catch(() => null);
-    if (jackettResult?.torrents) {
+    if (prowlarrResult?.torrents) {
       allTorrents.push(
-        ...jackettResult.torrents.map((t) => ({ ...t, provider: "jackett" })),
+        ...prowlarrResult.torrents.map((t) => ({ ...t, provider: "prowlarr" })),
       );
     }
   }
@@ -229,14 +231,14 @@ async function getShowTorrents(imdbId) {
     eztv.getShowTorrents(imdbId, showTitle),
     TIMEOUTS.EZTV,
   ).catch(() => ({}));
-  const jackettPromise = withTimeout(
-    jackett.getShowTorrents(imdbId, cleanedTitle, null, null),
-    TIMEOUTS.JACKETT,
+  const prowlarrPromise = withTimeout(
+    prowlarr.getShowTorrents(imdbId, cleanedTitle, null, null),
+    TIMEOUTS.PROWLARR,
   ).catch(() => ({}));
 
-  const [eztvData, jackettData] = await Promise.all([
+  const [eztvData, prowlarrData] = await Promise.all([
     eztvPromise,
-    jackettPromise,
+    prowlarrPromise,
   ]);
 
   const merge = (source, provider) => {
@@ -253,7 +255,7 @@ async function getShowTorrents(imdbId) {
   };
 
   merge(eztvData, "eztv");
-  merge(jackettData, "jackett");
+  merge(prowlarrData, "prowlarr");
 
   // Pack Injection Logic
   for (const s of Object.keys(allTorrents)) {

@@ -1,17 +1,22 @@
 "use strict";
-
+// Prowlarr Provider Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// This module interfaces with Prowlarr to search for movie and TV show torrents.
+// It includes advanced title matching, dynamic timeouts, retry logic, and a comprehensive scoring system to ensure high-quality results while maintaining responsiveness and reliability in the aggregator.
+// The search functions are designed to handle both movie and TV show queries, with special logic for parsing season/episode information from torrent titles and building user-friendly labels for the Stremio UI.
+//  The module also includes safety checks for API key configuration and network requests, as well as detailed logging for debugging and monitoring purposes.
 const axios = require("axios");
 const { parseRelease } = require("./sceneParser");
 
 // ================= CONFIG =================
 const CONFIG = Object.freeze({
-  jackett: {
+  prowlarr: {
     baseUrl:
-      process.env.JACKETT_URL?.replace(/\/$/, "") || "http://localhost:9696",
-    apiKey: process.env.JACKETT_API_KEY,
-    timeout: parseInt(process.env.JACKETT_TIMEOUT, 10) || 15000,
-    maxRetries: parseInt(process.env.JACKETT_MAX_RETRIES, 10) || 2,
-    retryDelay: parseInt(process.env.JACKETT_RETRY_DELAY, 10) || 800,
+      process.env.PROWLARR_URL?.replace(/\/$/, "") || "http://localhost:9696",
+    apiKey: process.env.PROWLARR_API_KEY,
+    timeout: parseInt(process.env.PROWLARR_TIMEOUT, 10) || 10000,
+    maxRetries: parseInt(process.env.PROWLARR_MAX_RETRIES, 10) || 2,
+    retryDelay: parseInt(process.env.PROWLARR_RETRY_DELAY, 10) || 800,
     categories: {
       movie: [2000],
       tv: [5000], // Added Animation/Kids categories
@@ -21,8 +26,8 @@ const CONFIG = Object.freeze({
   },
 });
 
-if (!CONFIG.jackett.apiKey) {
-  throw new Error("❌ JACKETT_API_KEY is required");
+if (!CONFIG.prowlarr.apiKey) {
+  throw new Error("❌ PROWLARR_API_KEY is required");
 }
 
 // ================= UTIL =================
@@ -33,7 +38,6 @@ function normalize(str) {
     .replace(/\s+/g, " ")
     .trim();
 }
-
 /**
  * Token-based title matching — more robust than substring includes().
  * Requires at least 60% of the target tokens to appear in the torrent title,
@@ -43,7 +47,6 @@ function titleMatches(torrentTitle, targetTitle) {
   if (!targetTitle) return true;
   const t1 = normalize(torrentTitle);
   const t2 = normalize(targetTitle);
-
   // Exact or substring match for long titles (safe)
   if (t1.includes(t2) && t2.length >= 6) return true;
 
@@ -51,11 +54,9 @@ function titleMatches(torrentTitle, targetTitle) {
   const tokens1 = new Set(t1.split(" "));
   const tokens2 = t2.split(" ");
   if (tokens2.length === 0) return false;
-
   const matched = tokens2.filter((tok) => tokens1.has(tok)).length;
   return matched / tokens2.length >= 0.6;
 }
-
 function cleanTitle(title) {
   return title
     ?.replace(/[:\-–—]/g, " ")
@@ -147,7 +148,7 @@ const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404]);
 async function fetchWithRetry(
   url,
   options,
-  retries = CONFIG.jackett.maxRetries,
+  retries = CONFIG.prowlarr.maxRetries,
 ) {
   try {
     return await axios.get(url, options);
@@ -156,7 +157,7 @@ async function fetchWithRetry(
     if (NON_RETRYABLE_STATUS.has(err.response?.status)) throw err;
 
     if (retries > 0) {
-      await new Promise((r) => setTimeout(r, CONFIG.jackett.retryDelay));
+      await new Promise((r) => setTimeout(r, CONFIG.prowlarr.retryDelay));
       return fetchWithRetry(url, options, retries - 1);
     }
     throw err;
@@ -164,10 +165,11 @@ async function fetchWithRetry(
 }
 
 // ================= SEARCH =================
+// Prowlarr expects the full "ttXXXXXXX" IMDb format — pass it through as-is.
+// Do NOT strip the "tt" prefix here.
+// The search function will handle it correctly, and this ensures we don't accidentally create
+// invalid IMDb IDs that cause Prowlarr to return no results.
 async function executeSearch(query, type, signal, advancedParams = {}) {
-  // Prowlarr expects the full "ttXXXXXXX" IMDb format — pass it through as-is.
-  // Do NOT strip the "tt" prefix here.
-
   if (
     !query &&
     !advancedParams.imdbid &&
@@ -186,7 +188,7 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
     if (type === "tvsearch") {
       params = {
         type: "tvsearch",
-        categories: CONFIG.jackett.categories.tv,
+        categories: CONFIG.prowlarr.categories.tv,
 
         // ✅ ALWAYS force a query if we have one
         query: query || undefined,
@@ -208,7 +210,7 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
     } else {
       params = {
         type: "moviesearch",
-        categories: CONFIG.jackett.categories.movie.join(","),
+        categories: CONFIG.prowlarr.categories.movie.join(","),
         ...(query &&
           !advancedParams.imdbid &&
           !advancedParams.tmdbid && { query }),
@@ -217,22 +219,22 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
       };
     }
 
-    // Remove undefined/null keys
+    // Remove undefined/null keys to avoid confusing the API and to ensure clean logging
     Object.keys(params).forEach(
       (key) => params[key] == null && delete params[key],
     );
 
     const res = await fetchWithRetry(
-      `${CONFIG.jackett.baseUrl}/api/v1/search`,
+      `${CONFIG.prowlarr.baseUrl}/api/v1/search`,
       {
         params,
-        timeout: CONFIG.jackett.timeout,
-        timeoutErrorMessage: "Jackett request timeout",
+        timeout: CONFIG.prowlarr.timeout,
+        timeoutErrorMessage: "prowlarr request timeout",
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
         signal,
         headers: {
-          "X-Api-Key": CONFIG.jackett.apiKey,
+          "X-Api-Key": CONFIG.prowlarr.apiKey,
           Accept: "application/json",
         },
       },
@@ -252,6 +254,13 @@ async function executeSearch(query, type, signal, advancedParams = {}) {
 }
 
 // ================= PARSER =================
+// The parsing logic is designed to be robust against the wide variety of naming conventions used in torrent titles,
+//  while also ensuring that we only return results that are relevant to the user's query. It checks for title matches,
+//  year matches (with special handling for high-quality releases),
+//  and extracts as much technical metadata as possible to feed into the scoring system.
+//  The use of multiple fields (title, magnet, infoHash) to identify and deduplicate torrents
+//  helps ensure that we don't miss valid results due to inconsistencies
+//  in how different indexers format their data.
 function parseTorrent(item, title, year) {
   const torrentTitle = item.title || item.name;
   if (!torrentTitle) return null;
@@ -352,6 +361,9 @@ function deduplicateResults(items) {
 }
 
 // ================= CLUSTERING =================
+// Clustering torrents by quality/source/codec to group similar releases together.
+// This helps the UI show "1 REMUX 2160p • 2 WEB-DL 1080p" instead of 10 individual torrents,
+//  while still allowing users to drill down into the alternatives if they want.
 function getClusterKey(t) {
   return [
     t.quality || "unknown",
@@ -387,6 +399,8 @@ function pickBestFromClusters(clusters) {
   return results;
 }
 // ================= LABEL =================
+// Builds a user-friendly label for the Stremio UI, showing the title, year, quality, source, HDR, codec, and audio info in a concise format.
+// For example: "Inception (2010) • 1080p • REMUX • Dolby Vision • AV1 • TrueHD"
 function buildLabel(title, year, t) {
   return [
     `${title || ""}${year ? ` (${year})` : ""}`,
@@ -401,6 +415,11 @@ function buildLabel(title, year, t) {
     .join(" • ");
 }
 // ================= MAIN =================
+// The main search and parsing functions for movies and TV shows.
+//  They handle the logic of querying Prowlarr, parsing the results,
+//  scoring them, clustering similar torrents together, and building labels for the UI.
+//  The TV show function also includes logic to extract season and episode information from torrent titles,
+//  which is critical for properly organizing TV show results in the Stremio interface.
 async function getTorrents(imdbId, title, year) {
   const controller = new AbortController();
 
@@ -408,7 +427,7 @@ async function getTorrents(imdbId, title, year) {
     Promise.race([
       promise,
       new Promise((resolve) =>
-        setTimeout(() => resolve([]), CONFIG.jackett.timeout),
+        setTimeout(() => resolve([]), CONFIG.prowlarr.timeout),
       ),
     ]);
 
@@ -434,7 +453,7 @@ async function getTorrents(imdbId, title, year) {
     const parsed = unique
       .map((item) => parseTorrent(item, title, year))
       .filter(Boolean)
-      .filter((t) => t.seeds >= CONFIG.jackett.minSeeds);
+      .filter((t) => t.seeds >= CONFIG.prowlarr.minSeeds);
 
     const scored = parsed.map((t) => ({ ...t, score: calculateScore(t) }));
     const clusters = clusterTorrents(scored);
@@ -443,24 +462,34 @@ async function getTorrents(imdbId, title, year) {
     return bestPerCluster
       .map((t) => ({ ...t, label: buildLabel(title, year, t) }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, CONFIG.jackett.maxResults);
+      .slice(0, CONFIG.prowlarr.maxResults);
   } finally {
     // clearTimeout(abortTimer);
   }
 }
 
-// ================= MOVIE =================
+// ================= MOVIES =================
+// The getMovieByImdb function is designed to fetch torrents for a specific movie using its IMDb ID,
+//  while the searchMovies function allows for a more general search based on a query string.
+//  Both functions utilize the getTorrents helper to perform the actual search and parsing logic,
+//  ensuring that we return high-quality, relevant results to the user.
 async function getMovieByImdb(imdbId, title, year) {
   const torrents = await getTorrents(imdbId, title, year, "movie");
   return torrents.length ? { imdbId, title, year, torrents } : null;
 }
-
+// The searchMovies function allows users to search for movies based on a query string,
+//  which can be a title, partial title, or even an IMDb ID.
+//  It returns a list of matching torrents, sorted by relevance and quality.
 async function searchMovies(query, limit = 20) {
   const torrents = await getTorrents(null, query, null, "movie");
   return torrents.slice(0, limit);
 }
 
-// ================= SHOW =================
+// ================= SHOWS =================
+// The getShowTorrents function is more complex due to the need to handle season and episode information,
+//  as well as the various ways that TV show torrents can be named (e.g., "Show S01E02", "Show 1x02", "Show Season 1", etc.).
+//  It organizes the results into a nested structure of seasons and episodes, which is required for proper display in the Stremio UI.
+//  The function also includes logic to inject season packs into individual episode entries, ensuring that users can easily find complete season releases when browsing episodes.
 async function getShowTorrents(imdbId, title, season, ep) {
   const searchTasks = [];
 
@@ -469,7 +498,7 @@ async function getShowTorrents(imdbId, title, season, ep) {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      CONFIG.jackett.timeout,
+      CONFIG.prowlarr.timeout,
     );
     try {
       return await executeSearch(query, "tvsearch", controller.signal, params);
@@ -570,6 +599,9 @@ async function getShowTorrents(imdbId, title, season, ep) {
           }));
       }
     }
+    // ------------------------------------------------------------
+    // Debug Logging to verify season/episode structure and counts
+    // ------------------------------------------------------------
     console.log(`[DEBUG] Seasons found keys:`, Object.keys(seasons));
     // if (seasons["16"])
     //   console.log(

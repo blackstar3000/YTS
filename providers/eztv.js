@@ -1,5 +1,7 @@
 "use strict";
-
+// EZTV Provider Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// Focused on TV shows, with optimized mirror list and unified parsing
 const axios = require("axios");
 const { parseRelease } = require("./sceneParser");
 
@@ -112,7 +114,7 @@ async function getShowTorrents(imdbId) {
         quality: meta.resolution || "SD",
         source: meta.source || "WEB",
         codec: meta.codec || "x264",
-        score: meta.score || 0, // Align with Jackett scoring
+        score: meta.score || 0, // Align with prowlarr scoring
         provider: "eztv",
       });
     }

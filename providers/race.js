@@ -1,4 +1,8 @@
 "use strict";
+// Race Provider Logic - 2026 Adaptive Intelligence
+// Manages provider health, dynamic timeouts, and result scoring.
+// This module is crucial for the aggregator's performance and reliability, as it allows us to intelligently select the best provider for each request based on real-time performance data and historical reliability,
+//  while also giving underperforming providers a chance to recover without manual intervention.
 
 /**
  * Race Provider Logic - 2026 Adaptive Intelligence

@@ -1,4 +1,8 @@
 "use strict";
+// Health Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// Implements a simple health tracking system for providers with auto-recovery after cooldown
+// This allows the aggregator to deprioritize consistently failing providers while giving them a chance to recover without manual intervention, improving overall reliability and user experience
 
 const health = new Map();
 

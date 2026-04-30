@@ -1,4 +1,7 @@
 "use strict";
+// Fallback Provider - 2026 Resiliency Standard
+// Prevents aggregator crashes by returning valid but empty data structures.
+// This ensures that even if all external providers fail, the addon remains responsive and doesn't cause errors in Stremio, while clearly communicating the issue to users through metadata placeholders and empty lists.
 
 /**
  * Fallback Provider - 2026 Resiliency Standard

@@ -1,4 +1,12 @@
 "use strict";
+// Cache Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// Implements a simple file-based cache with TTL, LRU eviction, and stale-on-error fallback
+// This cache is used to store results from providers like Prowlarr and OMDB, which can be slow or rate-limited
+// By caching results, we can improve response times and reduce load on these providers, while still providing reasonably fresh data to users
+// The cache is designed to be resilient,
+//  with atomic writes to prevent corruption and coalescing of concurrent requests to avoid
+//  "cache stampedes" when popular items expire
 
 const fs = require("fs").promises;
 const path = require("path");

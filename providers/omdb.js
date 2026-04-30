@@ -1,4 +1,9 @@
 "use strict";
+// OMDb Provider - 2026 Elite Edition
+// Fetches high-quality metadata and normalizes it for Prowlarr/Jackett consumption.
+// This provider is used by the aggregator to enrich metadata for movies and shows, improving search accuracy and user experience in Stremio.
+// It requires an API key, which should be set in the environment variable OMDB_API_KEY (e.g. in Render dashboard).
+// The getMetaByImdb function fetches metadata for a given IMDb ID and normalizes it to ensure compatibility with Prowlarr/Jackett's expectations, such as extracting a clean year from ranges and handling missing data gracefully.
 
 const axios = require("axios");
 

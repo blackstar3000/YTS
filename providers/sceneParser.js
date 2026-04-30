@@ -1,4 +1,8 @@
 "use strict";
+// Scene Release Parser - 2026 Elite Edition
+// Optimized for high-fidelity technical metadata extraction.
+// This parser is used by providers like YTS and EZTV to analyze release titles and extract detailed information about the release, such as resolution, source, codec, HDR format, audio format, and group.
+// The extracted metadata is then used to calculate a quality score for each torrent, which helps the aggregator prioritize higher-quality releases in search results and improve the user experience in Stremio.
 
 /**
  * Scene Release Parser - 2026 Elite Edition

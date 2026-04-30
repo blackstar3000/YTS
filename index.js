@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 "use strict";
+// Main Addon Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// Combines YTS, EZTV, and Prowlarr with intelligent caching and error handling
+// Requires manual setting of PROWLARR_URL, PROWLARR_API_KEY, and OMDB_API_KEY in environment variables (e.g. Render dashboard)
+// Jackett code has been removed to simplify the addon and focus on the most reliable sources (YTS for movies, EZTV for shows, Prowlarr as a powerful fallback for both)
 
 const path = require("path");
 const fs = require("fs");
@@ -17,7 +22,7 @@ const {
 const { cached } = require("./providers/cache");
 
 // ---------------------------------------------------------------------------
-// Genres
+// Genres for movie catalogs
 // ---------------------------------------------------------------------------
 const MOVIE_GENRES = [
   "Action",
@@ -145,7 +150,7 @@ const manifest = {
 // }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers for providers
 // ---------------------------------------------------------------------------
 function movieToMeta(m) {
   return {
@@ -163,43 +168,46 @@ function movieToMeta(m) {
   };
 }
 
-function movieToStreams(m) {
-  if (!m.torrents || !m.torrents.length) return [];
+function torrentToStream(t, { imdbId, season, episode } = {}) {
+  const hash = extractHash(t);
+  if (!hash && !t.magnet?.startsWith("magnet:")) return null;
+
+  const isYTS = t.provider === "yts";
+  const source = isYTS ? "YTS" : t.indexer || t.provider || "Prowlarr";
+  const titleLine = t.title || "";
+  const shortTitle =
+    titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
+
+  // Quality label logic (HDR/DV)
   const qOrder = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1 };
+  const q = t.quality || "";
+  const tags = [];
+  const upTitle = titleLine.toUpperCase();
+  if (/\bDV\b|DOLBY.?VISION/i.test(upTitle)) tags.push("DV");
+  if (/HDR10\+/i.test(upTitle)) tags.push("HDR10+");
+  else if (/\bHDR\b/i.test(upTitle)) tags.push("HDR");
+  const label = q === "2160p" ? "4K" : q;
+  const qualityLabel = tags.length ? `${label} ${tags.join(" · ")}` : label;
 
-  // Detect HDR/DV tags from torrent title for quality label
-  function getQualityLabel(t) {
-    const title = (t.title || "").toUpperCase();
-    const q = t.quality || "";
-    const tags = [];
-    if (/\bDV\b|DOLBY.?VISION/i.test(title)) tags.push("DV");
-    if (/HDR10\+/i.test(title)) tags.push("HDR10+");
-    else if (/\bHDR\b/i.test(title)) tags.push("HDR");
-    const label = q === "2160p" ? "4K" : q === "x265" ? "x265" : q;
-    return tags.length ? `${label} ${tags.join(" · ")}` : label;
-  }
+  const name = `Phantom\n${qualityLabel || "Unknown"}`;
+  const epTag =
+    season != null
+      ? `📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n`
+      : "";
+  const title = `${shortTitle}\n${epTag}🌱 ${t.seeds || 0}  💀 ${t.size || "?"}  📀 ${source}`;
 
-  return [...m.torrents]
-    .sort(
-      (a, b) =>
-        (qOrder[b.quality] || 0) - (qOrder[a.quality] || 0) ||
-        b.seeds - a.seeds,
-    )
-    .map((t) => {
-      const isYTS = t.provider !== "jackett";
-      const source = isYTS ? "YTS" : t.indexer || "Prowlarr";
-      const titleLine = t.title || m.title || "";
-      const shortTitle =
-        titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
+  const stream = {
+    name,
+    title,
+    behaviorHints: {
+      bingeGroup: season != null ? `eztv-${imdbId}` : `phantom-${imdbId}`,
+    },
+  };
 
-      return {
-        name: `Phantom\n${getQualityLabel(t)}`,
-        title: `${shortTitle}\n🌱 ${t.seeds}  💀 ${t.size}  📀 ${source}`,
-        infoHash: t.hash ? t.hash.toLowerCase() : undefined,
-        // DO NOT set externalUrl – it would open a browser
-        behaviorHints: { bingeGroup: `phantom-${m.imdbId}` },
-      };
-    });
+  if (hash) stream.infoHash = hash;
+  else if (t.magnet) stream.url = t.magnet;
+
+  return stream;
 }
 
 function showToMeta(show) {
@@ -213,7 +221,7 @@ function showToMeta(show) {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog handler
+// Catalog handler functions
 // ---------------------------------------------------------------------------
 const SORT_MAP = {
   "yts-latest": { sortBy: "date_added", minRating: 0 },
@@ -275,7 +283,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 });
 
 // ---------------------------------------------------------------------------
-// Meta handler
+// Meta handler functions
 // ---------------------------------------------------------------------------
 builder.defineMetaHandler(async ({ type, id }) => {
   const imdbId = id.split(":")[0];
@@ -340,7 +348,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 // ---------------------------------------------------------------------------
-// Stream handler
+// Stream handler functions
 // ---------------------------------------------------------------------------
 builder.defineStreamHandler(async ({ type, id }) => {
   // id format: "tt1234567" for movies, "tt1234567:1:2" for series (show:season:episode)
@@ -380,7 +388,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
             if (match) infoHash = match[1];
           }
-          const isYTS = t.provider !== "jackett";
+          const isYTS = t.provider !== "prowlarr";
           const source = isYTS ? "YTS" : t.indexer || "Prowlarr";
           const titleLine = t.title || "";
           const shortTitle =
@@ -432,7 +440,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
           // Determine provider name
           let providerName = "Unknown";
           if (t.provider === "eztv") providerName = "EZTV";
-          else if (t.provider === "jackett")
+          else if (t.provider === "prowlarr")
             providerName = t.indexer || "Prowlarr";
           else if (t.indexer) providerName = t.indexer;
           else providerName = t.provider || "Phantom";
@@ -459,7 +467,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
 });
 
 // ---------------------------------------------------------------------------
-// Start
+// Start HTTP Server
 // ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 7000;
 const addonInterface = builder.getInterface();

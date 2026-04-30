@@ -1,4 +1,9 @@
 "use strict";
+// YTS Provider Module
+// 2026 Refactored for Robustness, Clarity, and Performance
+// Focused on movies, with optimized mirror list and unified parsing
+// YTS encodes are generally low bitrate, so we implement a custom scoring system to ensure they don't outrank higher-quality releases
+// from other providers, while still surfacing them as a reliable option for users who prioritize availability and speed.
 
 const axios = require("axios");
 
@@ -56,7 +61,7 @@ function buildMagnet(hash, title) {
 /**
  * 2026 Internal Scoring for YTS.
  * YTS encodes are standard (low bitrate), so they get a reliable base score
- * but won't accidentally outrank a 40GB REMUX from Jackett.
+ * but won't accidentally outrank a 40GB REMUX from prowlarr.
  */
 function calculateYtsScore(quality, size) {
   let score = 0;
