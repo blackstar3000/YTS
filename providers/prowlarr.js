@@ -14,7 +14,7 @@ const CONFIG = Object.freeze({
     baseUrl:
       process.env.PROWLARR_URL?.replace(/\/$/, "") || "http://localhost:9696",
     apiKey: process.env.PROWLARR_API_KEY,
-    timeout: parseInt(process.env.PROWLARR_TIMEOUT, 10) || 15000,
+    timeout: parseInt(process.env.PROWLARR_TIMEOUT, 10) || 20000,
     maxRetries: parseInt(process.env.PROWLARR_MAX_RETRIES, 10) || 2,
     retryDelay: parseInt(process.env.PROWLARR_RETRY_DELAY, 10) || 800,
     categories: {
