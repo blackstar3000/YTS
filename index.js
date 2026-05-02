@@ -314,8 +314,12 @@ builder.defineStreamHandler(async ({ type, id }) => {
 const addonInterface = builder.getInterface();
 const originalHandler = addonInterface.handler;
 
-const logoPath = path.join(__dirname, "logo.png");
-const logoBuffer = fs.readFileSync(logoPath);
+const logoCandidates = [
+  path.join(__dirname, "logo.png"),
+  path.join(__dirname, "src", "logo.png"),
+];
+const logoPath = logoCandidates.find((candidate) => fs.existsSync(candidate));
+const logoBuffer = logoPath ? fs.readFileSync(logoPath) : null;
 
 addonInterface.handler = (req, res) => {
   const url = req.url.split("?")[0];
@@ -323,6 +327,10 @@ addonInterface.handler = (req, res) => {
   console.log("Addon request:", url);
 
   if (url === "/logo.png") {
+    if (!logoBuffer) {
+      res.writeHead(404);
+      return res.end();
+    }
     res.writeHead(200, {
       "Content-Type": "image/png",
       "Cache-Control": "public, max-age=86400"
