@@ -1,25 +1,23 @@
 "use strict";
-// Aggregator Module
-// Combines results from multiple providers with intelligent deduplication and scoring
-// 2026 Refactored for Robustness, Clarity, and Performance
+// Aggregates providers: catalog from YTS (+ race/fallback), merged movie streams, TV graph.
+
 const yts = require("./yts");
 const fallback = require("./fallback");
 const prowlarr = require("./prowlarr");
 const eztv = require("./eztv");
 const omdb = require("./omdb");
 const { cached } = require("./cache");
+const { raceProvidersV2 } = require("./race");
 const {
-  raceProvidersV2,
-  getStats,
   dynamicTimeout,
   isProviderHealthy,
-} = require("./race");
-const health = require("./health");
+  isHealthy,
+  markFailure,
+  markSuccess,
+} = require("./providersHealth");
+const logger = require("./logger");
 const { parseRelease } = require("./sceneParser");
 
-// ------------------------------
-// Safe timeout with NaN guard and default value
-// ------------------------------
 function withTimeout(promise, ms = 8000) {
   const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 8000;
   return Promise.race([
@@ -28,23 +26,6 @@ function withTimeout(promise, ms = 8000) {
       setTimeout(() => reject(new Error("Timeout")), safeMs),
     ),
   ]);
-}
-
-// ===============================
-// Hybrid Race + Merge Helpers
-// ===============================
-
-async function fetchprowlarrSearchResults(params) {
-  const query = (params.query || params.query_term || "").trim();
-  if (!query && !params.imdb_id) return [];
-
-  try {
-    const results = await withTimeout(prowlarr.searchMovies(query, 20), 15000);
-    return results || [];
-  } catch (err) {
-    console.warn(`[aggregator] prowlarr search failed: ${err.message}`);
-    return [];
-  }
 }
 
 function extractHashFromMagnet(magnet) {
@@ -77,69 +58,55 @@ function deduplicateTorrents(torrents) {
   return Array.from(seen.values());
 }
 
-function calculateFinalScore(torrent) {
-  const qualityScore = torrent.qualityScore || torrent.parsed?.score || 0;
-  const seeds = torrent.seeds || 0;
-  const providerBoost = torrent.provider === "prowlarr" ? 10 : 0;
-  return qualityScore * 1.5 + seeds * 0.3 + providerBoost;
+/**
+ * Single sort order for stream payloads (YTS + Prowlarr scores + sceneParser).
+ * @param {import("./types").Torrent[]} torrents
+ */
+function rankTorrentsForStream(torrents) {
+  const Q = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1 };
+  return [...torrents].sort((a, b) => {
+    const scoreA =
+      a.score ??
+      a.qualityScore ??
+      a.parsed?.score ??
+      a.finalScore ??
+      0;
+    const scoreB =
+      b.score ??
+      b.qualityScore ??
+      b.parsed?.score ??
+      b.finalScore ??
+      0;
+    if (scoreB !== scoreA) return scoreB - scoreA;
+    const qDiff = (Q[b.quality] || 0) - (Q[a.quality] || 0);
+    if (qDiff !== 0) return qDiff;
+    return (b.seeds || 0) - (a.seeds || 0);
+  });
 }
 
 // ------------------------------
-// Get movies and shows with intelligent provider selection, deduplication, and scoring
+// Movie catalog: YTS-shaped rows only (imdbId for Stremio meta).
 // ------------------------------
 async function getMovies(params) {
-  let providers = [
+  const providers = [
     {
       name: "yts",
       fn: () => withTimeout(yts.listMovies(params), dynamicTimeout("yts")),
-    },
-    {
-      name: "prowlarr",
-      fn: () =>
-        withTimeout(
-          prowlarr.searchMovies(params.query || params.query_term || "", 20),
-          dynamicTimeout("prowlarr"),
-        ),
     },
     {
       name: "fallback",
       fn: () =>
         withTimeout(fallback.listMovies(params), dynamicTimeout("fallback")),
     },
-  ].filter((p) => health.isHealthy(p.name) && isProviderHealthy(p.name));
+  ].filter((p) => isHealthy(p.name) && isProviderHealthy(p.name));
 
   try {
-    const { result: winnerResult, name: winnerName } = await raceProvidersV2(
-      providers,
-      1000,
-    );
-    let allTorrents = [...(winnerResult || [])];
-
-    if (winnerName !== "prowlarr") {
-      const prowlarrResults = await fetchprowlarrSearchResults(params);
-      allTorrents.push(
-        ...prowlarrResults.map((t) => ({ ...t, provider: "prowlarr" })),
-      );
-    }
-
-    const deduped = deduplicateTorrents(allTorrents);
-    const enriched = deduped.map((t) => {
-      const parsed = t.parsed || parseRelease(t.title || t.name || "");
-      return {
-        ...t,
-        parsed,
-        qualityScore: t.qualityScore || parsed?.score || 0,
-      };
-    });
-
-    const scored = enriched.map((t) => ({
-      ...t,
-      finalScore: calculateFinalScore(t),
-    }));
-    scored.sort((a, b) => b.finalScore - a.finalScore);
-
-    return scored.slice(0, 20);
+    const { result } = await raceProvidersV2(providers, 4500);
+    const limit = params.limit ?? 20;
+    const list = Array.isArray(result) ? result : [];
+    return list.slice(0, limit);
   } catch (err) {
+    logger.warn({ err: err.message }, "getMovies failed");
     return [];
   }
 }
@@ -153,27 +120,27 @@ const TIMEOUTS = {
 };
 
 async function getMovieByImdb(imdbId) {
+  const [ytsResult, omdbMeta] = await Promise.all([
+    withTimeout(yts.getMovieByImdb(imdbId), TIMEOUTS.YTS).catch(() => null),
+    cached(
+      `omdb:title:${imdbId}`,
+      TIMEOUTS.CACHE_TTL,
+      () => omdb.getMetaByImdb(imdbId),
+    ).catch(() => null),
+  ]);
+
   const allTorrents = [];
   let movieMeta = null;
 
-  const ytsResult = await withTimeout(
-    yts.getMovieByImdb(imdbId),
-    TIMEOUTS.YTS,
-  ).catch(() => null);
   if (ytsResult?.torrents) {
     allTorrents.push(...ytsResult.torrents);
     movieMeta = ytsResult;
   }
 
-  const omdbMeta = await cached(
-    `omdb:title:${imdbId}`,
-    TIMEOUTS.CACHE_TTL,
-    () => omdb.getMetaByImdb(imdbId),
-  ).catch(() => null);
   const title = movieMeta?.title || omdbMeta?.title;
   const year = movieMeta?.year || omdbMeta?.year;
 
-  if (title) {
+  if (prowlarr.isEnabled && title) {
     const prowlarrResult = await prowlarr
       .getMovieByImdb(imdbId, title, year)
       .catch(() => null);
@@ -186,17 +153,30 @@ async function getMovieByImdb(imdbId) {
 
   const enriched = deduplicateTorrents(allTorrents).map((t) => {
     const parsed = parseRelease(t.title || t.name || "");
-    return { ...t, parsed, qualityScore: parsed?.score || 0 };
+    return {
+      ...t,
+      parsed,
+      qualityScore: t.qualityScore ?? parsed?.score ?? 0,
+    };
   });
 
-  enriched.sort((a, b) => b.qualityScore - a.qualityScore || b.seeds - a.seeds);
+  const ranked = rankTorrentsForStream(enriched);
+  const metaBase = movieMeta || {};
+
+  const description = omdbMeta?.description || metaBase.summary;
+  const summary = metaBase.summary ?? omdbMeta?.description;
 
   return {
-    ...movieMeta,
+    ...metaBase,
+    ...(!movieMeta && omdbMeta ? omdbMeta : {}),
     imdbId,
     title: title || "Result",
-    torrents: enriched,
+    year: year ?? metaBase.year,
+    torrents: ranked,
     provider: "merged",
+    summary,
+    description,
+    background: metaBase.background || omdbMeta?.poster,
   };
 }
 
@@ -212,29 +192,27 @@ function cleanShowTitle(title) {
     .trim();
 }
 
-// ------------------------------
-// Improved getShowTorrents (FIXED SYNTAX)
-// ------------------------------
 async function getShowTorrents(imdbId) {
   const allTorrents = {};
-  let showTitle = null;
 
   const omdbMeta = await cached(
     `omdb:title:${imdbId}`,
     TIMEOUTS.CACHE_TTL,
     () => omdb.getMetaByImdb(imdbId),
   ).catch(() => null);
-  showTitle = omdbMeta?.title;
+  const showTitle = omdbMeta?.title;
   const cleanedTitle = cleanShowTitle(showTitle);
 
   const eztvPromise = withTimeout(
     eztv.getShowTorrents(imdbId, showTitle),
     TIMEOUTS.EZTV,
   ).catch(() => ({}));
-  const prowlarrPromise = withTimeout(
-    prowlarr.getShowTorrents(imdbId, cleanedTitle, null, null),
-    TIMEOUTS.PROWLARR,
-  ).catch(() => ({}));
+  const prowlarrPromise = prowlarr.isEnabled
+    ? withTimeout(
+        prowlarr.getShowTorrents(imdbId, cleanedTitle, null, null),
+        TIMEOUTS.PROWLARR,
+      ).catch(() => ({}))
+    : Promise.resolve({});
 
   const [eztvData, prowlarrData] = await Promise.all([
     eztvPromise,
@@ -257,7 +235,6 @@ async function getShowTorrents(imdbId) {
   merge(eztvData, "eztv");
   merge(prowlarrData, "prowlarr");
 
-  // Pack Injection Logic
   for (const s of Object.keys(allTorrents)) {
     const packs = allTorrents[s]["0"] || [];
     for (const e of Object.keys(allTorrents[s])) {
@@ -269,10 +246,7 @@ async function getShowTorrents(imdbId) {
           ...packs.filter((p) => !hashes.has(p.hash || p.infoHash)),
         );
       }
-      allTorrents[s][e].sort(
-        (a, b) =>
-          (b.score || b.qualityScore || 0) - (a.score || a.qualityScore || 0),
-      );
+      allTorrents[s][e] = rankTorrentsForStream(allTorrents[s][e]);
     }
   }
 
@@ -283,11 +257,12 @@ async function getLatestShows(page) {
   try {
     const shows = await eztv.getLatestShows(page);
     if (shows?.length) {
-      health.markSuccess("eztv");
+      markSuccess("eztv");
       return shows;
     }
   } catch (err) {
-    health.markFailure("eztv");
+    logger.warn({ err: err.message }, "EZTV getLatestShows failed");
+    markFailure("eztv");
   }
   return fallback.getLatestShows(page);
 }
@@ -298,4 +273,5 @@ module.exports = {
   getLatestShows,
   getShowTorrents,
   getShowMeta,
+  rankTorrentsForStream,
 };

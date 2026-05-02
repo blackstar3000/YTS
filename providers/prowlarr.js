@@ -22,13 +22,11 @@ const CONFIG = Object.freeze({
       tv: [5000], // Added Animation/Kids categories
     },
     maxResults: 50,
-    minSeeds: 1,
+    // minSeeds: 1,
   },
 });
 
-if (!CONFIG.prowlarr.apiKey) {
-  throw new Error("❌ PROWLARR_API_KEY is required");
-}
+const PROWLARR_ENABLED = Boolean(CONFIG.prowlarr.apiKey);
 
 // ================= UTIL =================
 function normalize(str) {
@@ -86,7 +84,7 @@ function buildMagnet(hash, name) {
   const cleanHash = hash.trim().toLowerCase();
 
   // Validate that it is a proper 40-character SHA1 hex string
-  if (!/^[0-9a-f]{40}$/.test(cleanHash)) {
+  if (!/^[a-z0-9]{32,40}$/i.test(cleanHash)) {
     console.warn(`[Magnet] Invalid hash detected: ${cleanHash}`);
     return null;
   }
@@ -170,6 +168,8 @@ async function fetchWithRetry(
 // The search function will handle it correctly, and this ensures we don't accidentally create
 // invalid IMDb IDs that cause Prowlarr to return no results.
 async function executeSearch(query, type, signal, advancedParams = {}) {
+  if (!PROWLARR_ENABLED) return [];
+
   if (
     !query &&
     !advancedParams.imdbid &&
@@ -299,7 +299,10 @@ function parseTorrent(item, title, year) {
     magnet = buildMagnet(infoHash, torrentTitle);
   }
 
-  if (!magnet?.startsWith("magnet:")) return null;
+  if (!magnet?.startsWith("magnet:")) {
+    console.log("⚠️ NO MAGNET:", item.title, item.link);
+    return null;
+  }
   if (/^https?:\/\//i.test(magnet)) return null;
 
   const sizeNum = item.size ? item.size / 1024 ** 3 : 0;
@@ -421,6 +424,8 @@ function buildLabel(title, year, t) {
 //  The TV show function also includes logic to extract season and episode information from torrent titles,
 //  which is critical for properly organizing TV show results in the Stremio interface.
 async function getTorrents(imdbId, title, year) {
+  if (!PROWLARR_ENABLED) return [];
+
   const controller = new AbortController();
 
   const searchWithTimeout = (promise) =>
@@ -453,7 +458,13 @@ async function getTorrents(imdbId, title, year) {
     const parsed = unique
       .map((item) => parseTorrent(item, title, year))
       .filter(Boolean)
-      .filter((t) => t.seeds >= CONFIG.prowlarr.minSeeds);
+      .filter((t) => {
+        // Allow unknown seeds
+        if (t.seeds == null) return true;
+
+        // Only reject if explicitly 0
+        return t.seeds > 0;
+      });
 
     const scored = parsed.map((t) => ({ ...t, score: calculateScore(t) }));
     const clusters = clusterTorrents(scored);
@@ -491,6 +502,8 @@ async function searchMovies(query, limit = 20) {
 //  It organizes the results into a nested structure of seasons and episodes, which is required for proper display in the Stremio UI.
 //  The function also includes logic to inject season packs into individual episode entries, ensuring that users can easily find complete season releases when browsing episodes.
 async function getShowTorrents(imdbId, title, season, ep) {
+  if (!PROWLARR_ENABLED) return {};
+
   const searchTasks = [];
 
   // Helper for isolated, timed-out searches
@@ -624,4 +637,5 @@ module.exports = {
   getTorrents,
   getShowTorrents,
   searchMovies,
+  isEnabled: PROWLARR_ENABLED,
 };

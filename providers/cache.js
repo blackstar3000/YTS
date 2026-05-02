@@ -1,93 +1,53 @@
 "use strict";
-// Cache Module
-// 2026 Refactored for Robustness, Clarity, and Performance
-// Implements a simple file-based cache with TTL, LRU eviction, and stale-on-error fallback
-// This cache is used to store results from providers like Prowlarr and OMDB, which can be slow or rate-limited
-// By caching results, we can improve response times and reduce load on these providers, while still providing reasonably fresh data to users
-// The cache is designed to be resilient,
-//  with atomic writes to prevent corruption and coalescing of concurrent requests to avoid
-//  "cache stampedes" when popular items expire
+// LRU in-memory cache + in-flight coalescing + stale-on-error fallback.
 
-const fs = require("fs").promises;
-const path = require("path");
+const { LRUCache } = require("lru-cache");
+const logger = require("./logger");
 
-const CACHE_FILE = path.join(__dirname, "cache.json");
-const MAX_CACHE_SIZE = 2000; // Increased for better Prowlarr performance
-let cache = {};
-let savePending = false;
-let cacheInitialized = false;
+const STALE_MS = 24 * 60 * 60 * 1000;
 const inFlight = new Map();
+/** @type {Map<string, { value: unknown, ts: number }>} */
+const shadow = new Map();
 
-async function initCache() {
-  try {
-    const data = await fs.readFile(CACHE_FILE, "utf8");
-    cache = JSON.parse(data);
-    console.log(`[Cache] Loaded ${Object.keys(cache).length} entries`);
-  } catch {
-    cache = {};
+const lru = new LRUCache({
+  max: 2000,
+});
+
+function trimShadow() {
+  if (shadow.size <= 2500) return;
+  const oldest = [...shadow.entries()].sort((a, b) => a[1].ts - b[1].ts);
+  for (let i = 0; i < 200 && i < oldest.length; i++) {
+    shadow.delete(oldest[i][0]);
   }
-  cacheInitialized = true;
 }
-
-const initPromise = initCache();
 
 /**
- * Atomic Save: Writes to a temp file then renames.
- * This prevents cache corruption if the process crashes during a write.
+ * @template T
+ * @param {string} key
+ * @param {number} ttlMs
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
  */
-async function saveCache() {
-  if (savePending) return;
-  savePending = true;
-
-  setTimeout(async () => {
-    try {
-      const tempFile = `${CACHE_FILE}.tmp`;
-      await fs.writeFile(tempFile, JSON.stringify(cache));
-      await fs.rename(tempFile, CACHE_FILE);
-    } catch (err) {
-      console.error("❌ Cache atomic write error:", err.message);
-    } finally {
-      savePending = false;
-    }
-  }, 2000); // 2-second buffer to batch multiple updates
-}
-
 async function cached(key, ttlMs, fn) {
-  if (!cacheInitialized) await initPromise;
+  const hit = lru.get(key);
+  if (hit !== undefined) return hit;
 
-  const now = Date.now();
-  const entry = cache[key];
-
-  // 1. Fresh Hit
-  if (entry && now - entry.ts < ttlMs) {
-    entry.ts = now; // Update "Last Used" time for LRU
-    return entry.value;
-  }
-
-  // 2. Coalesce concurrent requests (Prevents "Cache Stampede")
-  if (inFlight.has(key)) return inFlight.get(key);
+  if (inFlight.has(key)) return /** @type {Promise<T>} */ (inFlight.get(key));
 
   const fetchPromise = (async () => {
     try {
       const value = await fn();
-
-      // 3. LRU Eviction (Cleanup if full)
-      const keys = Object.keys(cache);
-      if (keys.length >= MAX_CACHE_SIZE) {
-        // Remove the 100 oldest entries at once to avoid constant recalculation
-        const sorted = keys.sort((a, b) => cache[a].ts - cache[b].ts);
-        for (let i = 0; i < 100; i++) delete cache[sorted[i]];
-      }
-
-      cache[key] = { ts: Date.now(), value };
-      saveCache();
+      const ttl = Math.max(Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 60000, 1);
+      lru.set(key, value, { ttl });
+      shadow.set(key, { value, ts: Date.now() });
+      trimShadow();
       return value;
     } catch (err) {
-      // 4. Stale-on-Error: If provider fails, use old data if it's < 24 hours old
-      const STALE_LIMIT = 24 * 60 * 60 * 1000;
-      if (entry && now - entry.ts < STALE_LIMIT) {
-        console.warn(`[Cache] Provider failed, serving stale: ${key}`);
-        return entry.value;
+      const entry = shadow.get(key);
+      const now = Date.now();
+      if (entry && now - entry.ts < STALE_MS) {
+        logger.warn({ err: err.message, key }, "cache: serving stale after error");
+        return /** @type {T} */ (entry.value);
       }
       throw err;
     } finally {

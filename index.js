@@ -1,14 +1,9 @@
 #!/usr/bin/env node
 "use strict";
-// Main Addon Module
-// 2026 Refactored for Robustness, Clarity, and Performance
-// Combines YTS, EZTV, and Prowlarr with intelligent caching and error handling
-// Requires manual setting of PROWLARR_URL, PROWLARR_API_KEY, and OMDB_API_KEY in environment variables (e.g. Render dashboard)
-// Jackett code has been removed to simplify the addon and focus on the most reliable sources (YTS for movies, EZTV for shows, Prowlarr as a powerful fallback for both)
 
 const path = require("path");
 const fs = require("fs");
-
+const http = require("http");
 require("dotenv").config();
 
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
@@ -21,137 +16,124 @@ const {
 } = require("./providers/aggregator");
 const { cached } = require("./providers/cache");
 
-// ---------------------------------------------------------------------------
-// Genres for movie catalogs
-// ---------------------------------------------------------------------------
-const MOVIE_GENRES = [
-  "Action",
-  "Adventure",
-  "Animation",
-  "Biography",
-  "Comedy",
-  "Crime",
-  "Documentary",
-  "Drama",
-  "Family",
-  "Fantasy",
-  "Film-Noir",
-  "History",
-  "Horror",
-  "Music",
-  "Musical",
-  "Mystery",
-  "Romance",
-  "Sci-Fi",
-  "Sport",
-  "Thriller",
-  "War",
-  "Western",
-];
+/** One key + TTL for meta and stream so “open detail” and “play” reuse the same getMovieByImdb result. */
+const MOVIE_PAYLOAD_CACHE_MS = Number.parseInt(
+  process.env.MOVIE_CACHE_MS ||
+    process.env.STREAM_MOVIE_CACHE_MS ||
+    "600000",
+  10,
+);
+
+function moviePayloadCacheKey(imdbId) {
+  return `movie:payload:${imdbId}`;
+}
 
 // ---------------------------------------------------------------------------
-// Manifest — 6 movie catalogs + 1 series catalog
+// CONFIG
 // ---------------------------------------------------------------------------
-const manifest = {
-  id: "community.phantom.stremio",
-  version: "2.0.0",
-  name: "Phantom",
-  description:
-    "Movies & TV Series via magnet links — powered by YTS, EZTV & Prowlarr",
-  logo: "https://hosting.photobucket.com/26a6037f-4bda-4fe6-a73d-662dc9064777/892c5dcb-091d-4082-900c-4e3febc820c8.png",
-
-  resources: ["catalog", "meta", "stream"],
-  types: ["movie", "series"],
-  idPrefixes: ["tt"],
-
-  catalogs: [
-    // ---- Movies ----
-    {
-      id: "yts-latest",
-      type: "movie",
-      name: "🎬 Phantom — Latest",
-      extra: [
-        { name: "search", isRequired: false },
-        { name: "skip", isRequired: false },
-        { name: "genre", isRequired: false, options: MOVIE_GENRES },
-      ],
-    },
-    {
-      id: "yts-top-rated",
-      type: "movie",
-      name: "⭐ Phantom — Top Rated",
-      extra: [
-        { name: "skip", isRequired: false },
-        { name: "genre", isRequired: false, options: MOVIE_GENRES },
-      ],
-    },
-    {
-      id: "yts-trending",
-      type: "movie",
-      name: "🔥 Phantom — Trending",
-      extra: [
-        { name: "skip", isRequired: false },
-        { name: "genre", isRequired: false, options: MOVIE_GENRES },
-      ],
-    },
-    {
-      id: "yts-4k",
-      type: "movie",
-      name: "🎥 Phantom — 4K Ultra HD",
-      extra: [
-        { name: "skip", isRequired: false },
-        { name: "genre", isRequired: false, options: MOVIE_GENRES },
-      ],
-    },
-    {
-      id: "yts-hindi",
-      type: "movie",
-      name: "🇮🇳 Phantom — Bollywood / Hindi",
-      extra: [
-        { name: "skip", isRequired: false },
-        { name: "search", isRequired: false },
-      ],
-    },
-    {
-      id: "yts-recent-high-rated",
-      type: "movie",
-      name: "🏆 Phantom — Recent & Highly Rated",
-      extra: [
-        { name: "skip", isRequired: false },
-        { name: "genre", isRequired: false, options: MOVIE_GENRES },
-      ],
-    },
-    // ---- Series ----
-    {
-      id: "eztv-latest",
-      type: "series",
-      name: "📺 Phantom — Latest Episodes",
-      extra: [{ name: "skip", isRequired: false }],
-    },
-  ],
-
-  behaviorHints: { adult: false, p2p: true },
-};
+const PORT = process.env.PORT || 7000;
 
 // ---------------------------------------------------------------------------
-// TTL Cache
+// HELPERS
 // ---------------------------------------------------------------------------
-// const cache = new Map();
-// function cached(key, ttlMs, fn) {
-//   const now = Date.now();
-//   if (cache.has(key)) {
-//     const { ts, value } = cache.get(key);
-//     if (now - ts < ttlMs) return Promise.resolve(value);
-//   }
-//   return Promise.resolve(fn()).then(value => {
-//     cache.set(key, { ts: now, value });
-//     return value;
-//   });
-// }
+
+function extractHash(t) {
+  if (t.hash) return t.hash.toLowerCase();
+
+  if (t.infoHash) return t.infoHash.toLowerCase();
+
+  if (t.magnet?.startsWith("magnet:")) {
+    const match = t.magnet.match(/btih:([A-Z0-9]{32,40})/i);
+    if (match) return match[1].toLowerCase();
+  }
+
+  return null;
+}
+
+function isValidTorrent(t) {
+  const hash = extractHash(t);
+  if (!hash) {
+    if (process.env.DEBUG)
+      console.log("❌ NO HASH:", t.title);
+    return false;
+  }
+
+  if (t.provider === "yts") {
+    return true;
+  }
+
+  if (t.seeds != null && t.seeds < 1) {
+    if (process.env.DEBUG)
+      console.log("❌ LOW SEEDS:", t.title, t.seeds);
+    return false;
+  }
+
+  return true;
+}
+
+function dedupeTorrents(list) {
+  const seen = new Set();
+  return list.filter((t) => {
+    const hash = extractHash(t);
+    if (!hash || seen.has(hash)) return false;
+    seen.add(hash);
+    t.hash = hash;
+    return true;
+  });
+}
+
+function buildQualityLabel(t) {
+  const tags = [];
+  const title = (t.title || "").toUpperCase();
+
+  if (/DV|DOLBY.?VISION/.test(title)) tags.push("DV");
+  if (/HDR10\+/.test(title)) tags.push("HDR10+");
+  else if (/HDR/.test(title)) tags.push("HDR");
+  if (/X265|HEVC/.test(title)) tags.push("HEVC");
+  if (/REMUX/.test(title)) tags.push("REMUX");
+  if (/BLURAY/.test(title)) tags.push("BluRay");
+
+  const base = t.quality === "2160p" ? "4K" : t.quality || "Unknown";
+  return tags.length ? `${base} ${tags.join(" · ")}` : base;
+}
+
+function torrentToStream(t, { imdbId, season, episode }) {
+  const hash = extractHash(t);
+  if (!hash) return null;
+
+  const source =
+    t.provider === "yts"
+      ? "YTS"
+      : t.provider === "eztv"
+        ? "EZTV"
+        : t.indexer || "Prowlarr";
+
+  const title = (t.title || "").slice(0, 50);
+
+  return {
+    name: `Phantom\n${buildQualityLabel(t)}`,
+    title: `${title}
+${season ? `📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n` : ""}
+🌱 ${t.seeds || 0}  💀 ${t.size || "?"}  📀 ${source}`,
+    infoHash: hash,
+    behaviorHints: {
+      bingeGroup: season ? `series-${imdbId}` : `movie-${imdbId}`,
+    },
+  };
+}
+
+/** Order preserved from aggregator ranking; cap list size for Stremio UX. */
+function processTorrents(list, ctx) {
+  return dedupeTorrents(list.filter(isValidTorrent))
+    .map((t) => torrentToStream(t, ctx))
+    .filter(Boolean)
+    .slice(0, 40);
+}
 
 // ---------------------------------------------------------------------------
-// Helpers for providers
+// META HELPERS
 // ---------------------------------------------------------------------------
+
 function movieToMeta(m) {
   return {
     id: m.imdbId,
@@ -163,51 +145,8 @@ function movieToMeta(m) {
     genres: m.genres,
     imdbRating: m.rating ? String(m.rating) : undefined,
     runtime: m.runtime ? `${m.runtime} min` : undefined,
-    description: m.summary,
-    trailers: m.ytTrailer ? [{ source: m.ytTrailer, type: "Trailer" }] : [],
+    description: m.summary ?? m.description,
   };
-}
-
-function torrentToStream(t, { imdbId, season, episode } = {}) {
-  const hash = extractHash(t);
-  if (!hash && !t.magnet?.startsWith("magnet:")) return null;
-
-  const isYTS = t.provider === "yts";
-  const source = isYTS ? "YTS" : t.indexer || t.provider || "Prowlarr";
-  const titleLine = t.title || "";
-  const shortTitle =
-    titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
-
-  // Quality label logic (HDR/DV)
-  const qOrder = { "2160p": 4, "1080p": 3, "720p": 2, "480p": 1 };
-  const q = t.quality || "";
-  const tags = [];
-  const upTitle = titleLine.toUpperCase();
-  if (/\bDV\b|DOLBY.?VISION/i.test(upTitle)) tags.push("DV");
-  if (/HDR10\+/i.test(upTitle)) tags.push("HDR10+");
-  else if (/\bHDR\b/i.test(upTitle)) tags.push("HDR");
-  const label = q === "2160p" ? "4K" : q;
-  const qualityLabel = tags.length ? `${label} ${tags.join(" · ")}` : label;
-
-  const name = `Phantom\n${qualityLabel || "Unknown"}`;
-  const epTag =
-    season != null
-      ? `📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n`
-      : "";
-  const title = `${shortTitle}\n${epTag}🌱 ${t.seeds || 0}  💀 ${t.size || "?"}  📀 ${source}`;
-
-  const stream = {
-    name,
-    title,
-    behaviorHints: {
-      bingeGroup: season != null ? `eztv-${imdbId}` : `phantom-${imdbId}`,
-    },
-  };
-
-  if (hash) stream.infoHash = hash;
-  else if (t.magnet) stream.url = t.magnet;
-
-  return stream;
 }
 
 function showToMeta(show) {
@@ -216,273 +155,171 @@ function showToMeta(show) {
     type: "series",
     name: show.title,
     poster: show.screenshot || "",
-    description: `Latest: S${String(show.season).padStart(2, "0")}E${String(show.episode).padStart(2, "0")}`,
+    description: `Latest: S${show.season}E${show.episode}`,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Catalog handler functions
+// MANIFEST
 // ---------------------------------------------------------------------------
-const SORT_MAP = {
-  "yts-latest": { sortBy: "date_added", minRating: 0 },
-  "yts-top-rated": { sortBy: "rating", minRating: 7 },
-  "yts-trending": { sortBy: "download_count", minRating: 0 },
-  "yts-4k": { sortBy: "date_added", minRating: 0, quality: "2160p" },
-  "yts-hindi": { sortBy: "date_added", minRating: 0, genre: "Hindi" },
-  "yts-recent-high-rated": { sortBy: "year", minRating: 7 },
+
+const manifest = {
+  id: "community.phantom.stremio",
+  version: "3.0.0",
+  name: "Phantom",
+  description: "Optimized Torrent Streaming Addon",
+  resources: ["catalog", "meta", "stream"],
+  types: ["movie", "series"],
+  idPrefixes: ["tt"],
+  catalogs: [
+    { id: "yts-latest", type: "movie", name: "🎬 Latest" },
+    { id: "eztv-latest", type: "series", name: "📺 Latest Episodes" },
+  ],
+  behaviorHints: { p2p: true },
 };
+
+// ---------------------------------------------------------------------------
+// BUILDER
+// ---------------------------------------------------------------------------
 
 const builder = new addonBuilder(manifest);
 
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  const search = extra && extra.search;
-  const skip = parseInt((extra && extra.skip) || "0", 10);
-  const genre = extra && extra.genre;
-  const page = Math.floor(skip / 20) + 1;
+// ---------------------------------------------------------------------------
+// CATALOG
+// ---------------------------------------------------------------------------
 
-  // --- Series catalog ---
-  if (type === "series" && id === "eztv-latest") {
-    const cacheKey = `eztv:latest:${page}`;
-    try {
-      const shows = await cached(cacheKey, 5 * 60 * 1000, () =>
-        getLatestShows(page),
-      );
-      return { metas: shows.map(showToMeta) };
-    } catch (err) {
-      console.error("[catalog/series]", err.message);
-      return { metas: [] };
-    }
-  }
-
-  // --- Movie catalogs ---
-  if (type === "movie" && SORT_MAP[id]) {
-    const { sortBy, minRating, quality } = SORT_MAP[id];
-    // Hindi catalog ignores genre filter (it IS the genre filter)
-    const effectiveGenre = id === "yts-hindi" ? undefined : genre;
-    const cacheKey = `yts:${id}:${page}:${effectiveGenre || ""}:${search || ""}`;
-    try {
-      const movies = await cached(cacheKey, 5 * 60 * 1000, () =>
-        getMovies({
-          query: search,
-          genre: effectiveGenre,
-          page,
-          limit: 20,
-          sortBy,
-          minRating,
-          quality,
-        }),
+builder.defineCatalogHandler(async ({ type, id }) => {
+  try {
+    if (type === "movie") {
+      const movies = await cached(
+        `catalog:movies:${id || "yts-latest"}`,
+        300000,
+        () => getMovies({ limit: 20 }),
       );
       return { metas: movies.map(movieToMeta) };
-    } catch (err) {
-      console.error("[catalog/movie]", err.message);
-      return { metas: [] };
     }
+
+    if (type === "series") {
+      const shows = await cached(
+        `catalog:shows:${id || "eztv-latest"}`,
+        300000,
+        getLatestShows,
+      );
+      return { metas: shows.map(showToMeta) };
+    }
+  } catch (e) {
+    console.error("catalog error", e.message);
   }
 
   return { metas: [] };
 });
 
 // ---------------------------------------------------------------------------
-// Meta handler functions
+// META
 // ---------------------------------------------------------------------------
+
 builder.defineMetaHandler(async ({ type, id }) => {
   const imdbId = id.split(":")[0];
 
-  if (type === "movie") {
-    try {
-      const movie = await cached(`movie:${imdbId}`, 10 * 60 * 1000, () =>
-        getMovieByImdb(imdbId),
+  try {
+    if (type === "movie") {
+      const movie = await cached(
+        moviePayloadCacheKey(imdbId),
+        MOVIE_PAYLOAD_CACHE_MS,
+        () => getMovieByImdb(imdbId),
       );
       return { meta: movie ? movieToMeta(movie) : null };
-    } catch (err) {
-      console.error("[meta/movie]", err.message);
-      return { meta: null };
     }
-  }
 
-  if (type === "series") {
-    try {
-      // Get real show title from aggregator (via OMDb)
-      const showMeta = await cached(
-        `meta:series-title:${imdbId}`,
-        24 * 60 * 60 * 1000,
-        () => getShowMeta(imdbId),
-      );
+    if (type === "series") {
+      const showMeta = await getShowMeta(imdbId);
+      const seasons = await getShowTorrents(imdbId);
 
-      // Build series meta with video objects per episode from EZTV
-      const seasons = await cached(
-        `meta:series:${imdbId}`,
-        10 * 60 * 1000,
-        () => getShowTorrents(imdbId),
-      );
       const videos = [];
-      for (const [s, eps] of Object.entries(seasons)) {
-        for (const [e] of Object.entries(eps)) {
-          const sNum = parseInt(s);
-          const eNum = parseInt(e);
+
+      for (const s in seasons) {
+        for (const e in seasons[s]) {
           videos.push({
-            id: `${imdbId}:${sNum}:${eNum}`,
-            title: `S${String(sNum).padStart(2, "0")}E${String(eNum).padStart(2, "0")}`,
-            season: sNum,
-            episode: eNum,
-            released: new Date(2000, 0, 1).toISOString(),
+            id: `${imdbId}:${s}:${e}`,
+            title: `S${s}E${e}`,
+            season: +s,
+            episode: +e,
           });
         }
       }
-      videos.sort((a, b) => a.season - b.season || a.episode - b.episode);
+
       return {
         meta: {
           id: imdbId,
           type: "series",
-          name: showMeta ? showMeta.title : `TV Show (${imdbId})`,
+          name: showMeta?.title || imdbId,
           videos,
         },
       };
-    } catch (err) {
-      console.error("[meta/series]", err.message);
-      return { meta: null };
     }
+  } catch (e) {
+    console.error("meta error", e.message);
   }
 
   return { meta: null };
 });
 
 // ---------------------------------------------------------------------------
-// Stream handler functions
+// STREAM
 // ---------------------------------------------------------------------------
+
 builder.defineStreamHandler(async ({ type, id }) => {
-  // id format: "tt1234567" for movies, "tt1234567:1:2" for series (show:season:episode)
-  const parts = id.split(":");
-  const imdbId = parts[0];
-  const season = parts[1] ? parseInt(parts[1]) : null;
-  const episode = parts[2] ? parseInt(parts[2]) : null;
+  const [imdbId, s, e] = id.split(":");
+  const season = s ? +s : null;
+  const episode = e ? +e : null;
 
-  if (type === "movie") {
-    try {
-      const movie = await cached(`movie:${imdbId}`, 10 * 60 * 1000, () =>
-        getMovieByImdb(imdbId),
+  try {
+    if (type === "movie") {
+      const movie = await cached(
+        moviePayloadCacheKey(imdbId),
+        MOVIE_PAYLOAD_CACHE_MS,
+        () => getMovieByImdb(imdbId),
       );
-      if (!movie || !movie.torrents || movie.torrents.length === 0) {
-        return { streams: [], cacheMaxAge: 3600 };
-      }
+      if (!movie?.torrents) return { streams: [] };
 
-      // Filter and prepare movie streams
-      const streams = movie.torrents
-        .filter((t) => {
-          // Keep only if we have a valid infoHash (hash field) or a magnet that is a magnet link with hash
-          if (t.hash) return true;
-          if (t.magnet && t.magnet.startsWith("magnet:")) {
-            // Extract hash from magnet if possible
-            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
-            if (match) {
-              t.hash = match[1];
-              return true;
-            }
-          }
-          return false;
-        })
-        .map((t) => {
-          let infoHash = t.hash;
-          // If hash still missing but magnet exists, try again
-          if (!infoHash && t.magnet && t.magnet.startsWith("magnet:")) {
-            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
-            if (match) infoHash = match[1];
-          }
-          const isYTS = t.provider !== "prowlarr";
-          const source = isYTS ? "YTS" : t.indexer || "Prowlarr";
-          const titleLine = t.title || "";
-          const shortTitle =
-            titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
-          return {
-            name: `Phantom\n${t.quality}`,
-            title: `${shortTitle}\n🌱 ${t.seeds}  💀 ${t.size}  📀 ${source}`,
-            infoHash: infoHash ? infoHash.toLowerCase() : undefined,
-            // DO NOT set externalUrl – it would open a browser
-            behaviorHints: { bingeGroup: `phantom-${imdbId}` },
-          };
-        })
-        .filter((s) => s.infoHash); // final safety: only streams with hash
-
-      return { streams, cacheMaxAge: 3600 };
-    } catch (err) {
-      console.error("[stream/movie]", err.message);
-      return { streams: [], cacheMaxAge: 3600 };
+      return {
+        streams: processTorrents(movie.torrents, { imdbId }),
+        cacheMaxAge: 1800,
+      };
     }
-  }
-  if (type === "series" && season !== null && episode !== null) {
-    try {
-      const seasons = await cached(
-        `streams:series:${imdbId}`,
-        10 * 60 * 1000,
-        () => getShowTorrents(imdbId),
-      );
-      const eps = (seasons[String(season)] || {})[String(episode)] || [];
 
-      const streams = eps
-        .filter((t) => {
-          // Keep only if we have a valid infoHash (hash) or a magnet link with hash
-          if (t.hash) return true;
-          if (t.magnet && t.magnet.startsWith("magnet:")) {
-            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
-            if (match) {
-              t.hash = match[1];
-              return true;
-            }
-          }
-          return false;
-        })
-        .map((t) => {
-          let infoHash = t.hash;
-          if (!infoHash && t.magnet && t.magnet.startsWith("magnet:")) {
-            const match = t.magnet.match(/btih:([a-fA-F0-9]{40})/i);
-            if (match) infoHash = match[1];
-          }
-          // Determine provider name
-          let providerName = "Unknown";
-          if (t.provider === "eztv") providerName = "EZTV";
-          else if (t.provider === "prowlarr")
-            providerName = t.indexer || "Prowlarr";
-          else if (t.indexer) providerName = t.indexer;
-          else providerName = t.provider || "Phantom";
-          const titleLine = t.title || "";
-          const shortTitle =
-            titleLine.length > 50 ? titleLine.slice(0, 50) + "…" : titleLine;
-          return {
-            name: `Phantom\n${t.quality}`,
-            title: `${shortTitle}📺 S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}\n${t.quality} | ${t.size}\n🌱 ${t.seeds} seeds  👥 ${providerName}`,
-            infoHash: infoHash ? infoHash.toLowerCase() : undefined,
-            // No externalUrl – force torrent playback
-            behaviorHints: { bingeGroup: `eztv-${imdbId}` },
-          };
-        })
-        .filter((s) => s.infoHash); // only streams with hash
+    if (type === "series") {
+      const seasons = await getShowTorrents(imdbId);
+      const eps = seasons?.[season]?.[episode] || [];
 
-      return { streams, cacheMaxAge: 3600 };
-    } catch (err) {
-      console.error("[stream/series]", err.message);
-      return { streams: [], cacheMaxAge: 3600 };
+      return {
+        streams: processTorrents(eps, { imdbId, season, episode }),
+        cacheMaxAge: 1800,
+      };
     }
+  } catch (e) {
+    console.error("stream error", e.message);
   }
-  return { streams: [], cacheMaxAge: 3600 };
+
+  return { streams: [] };
 });
 
 // ---------------------------------------------------------------------------
-// Start HTTP Server
+// SERVER
 // ---------------------------------------------------------------------------
-const PORT = process.env.PORT || 7000;
-const addonInterface = builder.getInterface();
+// Rate limiting: stremio-addon-sdk uses a plain http handler (not Express).
+// For public hosts, add a reverse-proxy limiter or a small token-bucket here.
 
-// Serve logo.png statically
-const http = require("http");
+const addonInterface = builder.getInterface();
 const originalHandler = addonInterface.handler;
+
 addonInterface.handler = (req, res) => {
   if (req.url === "/logo.png") {
-    const logoPath = path.join(__dirname, "Stremio logo.png");
+    const logoPath = path.join(__dirname, "logo.png");
     fs.readFile(logoPath, (err, data) => {
       if (err) {
         res.writeHead(404);
-        res.end();
-        return;
+        return res.end();
       }
       res.writeHead(200, { "Content-Type": "image/png" });
       res.end(data);
@@ -494,11 +331,4 @@ addonInterface.handler = (req, res) => {
 
 serveHTTP(addonInterface, { port: PORT });
 
-console.log("\n👻  Phantom is running!");
-console.log(`    Manifest : http://localhost:${PORT}/manifest.json`);
-console.log(`    Install  : stremio://localhost:${PORT}/manifest.json\n`);
-console.log("Catalogs:");
-console.log(
-  "  Movies  → Latest, Top Rated, Trending, 4K, Bollywood, Recent High Rated",
-);
-console.log("  Series  → Latest Episodes\n");
+console.log(`👻 Phantom running → http://localhost:${PORT}/manifest.json`);
