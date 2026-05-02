@@ -629,6 +629,7 @@ async function getShowTorrents(imdbId, title, season, ep) {
 
 // ================= EXPORT =================
 module.exports = {
+  isEnabled: Boolean(CONFIG.prowlarr.apiKey),
   getMovieByImdb,
   getTorrents,
   getShowTorrents,
