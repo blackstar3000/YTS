@@ -26,7 +26,9 @@ const CONFIG = Object.freeze({
   },
 });
 
-const PROWLARR_ENABLED = Boolean(CONFIG.prowlarr.apiKey);
+if (!CONFIG.prowlarr.apiKey) {
+  throw new Error("❌ PROWLARR_API_KEY is required");
+}
 
 // ================= UTIL =================
 function normalize(str) {
@@ -53,7 +55,7 @@ function titleMatches(torrentTitle, targetTitle) {
   const tokens2 = t2.split(" ");
   if (tokens2.length === 0) return false;
   const matched = tokens2.filter((tok) => tokens1.has(tok)).length;
-  return matched / tokens2.length >= 0.6;
+  return matched / tokens2.length >= 0.4; // 40% token match threshold
 }
 function cleanTitle(title) {
   return title
@@ -168,8 +170,6 @@ async function fetchWithRetry(
 // The search function will handle it correctly, and this ensures we don't accidentally create
 // invalid IMDb IDs that cause Prowlarr to return no results.
 async function executeSearch(query, type, signal, advancedParams = {}) {
-  if (!PROWLARR_ENABLED) return [];
-
   if (
     !query &&
     !advancedParams.imdbid &&
@@ -424,8 +424,6 @@ function buildLabel(title, year, t) {
 //  The TV show function also includes logic to extract season and episode information from torrent titles,
 //  which is critical for properly organizing TV show results in the Stremio interface.
 async function getTorrents(imdbId, title, year) {
-  if (!PROWLARR_ENABLED) return [];
-
   const controller = new AbortController();
 
   const searchWithTimeout = (promise) =>
@@ -502,8 +500,6 @@ async function searchMovies(query, limit = 20) {
 //  It organizes the results into a nested structure of seasons and episodes, which is required for proper display in the Stremio UI.
 //  The function also includes logic to inject season packs into individual episode entries, ensuring that users can easily find complete season releases when browsing episodes.
 async function getShowTorrents(imdbId, title, season, ep) {
-  if (!PROWLARR_ENABLED) return {};
-
   const searchTasks = [];
 
   // Helper for isolated, timed-out searches
@@ -637,5 +633,4 @@ module.exports = {
   getTorrents,
   getShowTorrents,
   searchMovies,
-  isEnabled: PROWLARR_ENABLED,
 };
