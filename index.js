@@ -168,6 +168,7 @@ const manifest = {
   version: "3.0.0",
   name: "Phantom",
   description: "Optimized Torrent Streaming Addon",
+  logo: "https://hosting.photobucket.com/26a6037f-4bda-4fe6-a73d-662dc9064777/892c5dcb-091d-4082-900c-4e3febc820c8.png",
   resources: ["catalog", "meta", "stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
@@ -313,20 +314,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
 const addonInterface = builder.getInterface();
 const originalHandler = addonInterface.handler;
 
+const logoPath = path.join(__dirname, "logo.png");
+const logoBuffer = fs.readFileSync(logoPath);
+
 addonInterface.handler = (req, res) => {
-  if (req.url === "/logo.png") {
-    const logoPath = path.join(__dirname, "logo.png");
-    fs.readFile(logoPath, (err, data) => {
-      if (err) {
-        res.writeHead(404);
-        return res.end();
-      }
-      res.writeHead(200, { "Content-Type": "image/png" });
-      res.end(data);
+  const url = req.url.split("?")[0];
+
+  console.log("Addon request:", url);
+
+  if (url === "/logo.png") {
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "public, max-age=86400"
     });
-    return;
+    return res.end(logoBuffer);
   }
-  originalHandler(req, res);
+
+  return originalHandler(req, res);
 };
 
 serveHTTP(addonInterface, { port: PORT });
